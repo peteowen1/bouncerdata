@@ -1,0 +1,21 @@
+# Large data files (use GitHub Releases)
+*.duckdb
+*.duckdb.wal
+
+# Model files
+models/*.ubj
+models/*.rds
+models/*.json
+models/*.png
+
+# Scraped data
+fox_cricket/
+
+# Raw JSON data (can be re-downloaded from Cricsheet)
+json_files/
+
+# R artifacts
+.Rhistory
+.Rdata
+.RData
+*.Rproj.user
