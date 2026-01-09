@@ -19,3 +19,7 @@ json_files/
 .Rdata
 .RData
 *.Rproj.user
+
+# Claude Code
+.claude/
+CLAUDE.md
