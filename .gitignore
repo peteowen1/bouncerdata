@@ -23,3 +23,4 @@ json_files/
 # Claude Code
 .claude/
 CLAUDE.md
+.Rproj.user
