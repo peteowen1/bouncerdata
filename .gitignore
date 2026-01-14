@@ -24,3 +24,11 @@ json_files/
 .claude/
 CLAUDE.md
 .Rproj.user
+
+# SSH keys and secrets (never commit!)
+*.key
+*.pem
+ssh-key*
+*.github_pat
+.env
+.secrets

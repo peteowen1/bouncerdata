@@ -3,7 +3,7 @@
 #
 # Run this script on the VM after SSH'ing in:
 #   ssh -i "ssh-key.key" opc@168.138.108.69
-#   curl -sSL https://raw.githubusercontent.com/peteowen1/bouncerdata/main/scripts/oracle_vm/setup_vm.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/peteowen1/bouncerdata/dev/scripts/oracle_vm/setup_vm.sh | bash
 #
 # Or copy files manually and run:
 #   bash setup_vm.sh
@@ -46,7 +46,7 @@ echo ""
 echo "3. Installing bouncer R package..."
 $HOME/bin/micromamba run -n r-env Rscript -e "
 if (!requireNamespace('remotes', quietly = TRUE)) install.packages('remotes')
-remotes::install_github('peteowen1/bouncerverse', subdir = 'bouncer', upgrade = 'never')
+remotes::install_github('peteowen1/bouncer', ref = 'dev', upgrade = 'never')
 cat('bouncer package installed!\n')
 "
 
