@@ -4,25 +4,24 @@
 # This script runs on Oracle Cloud VM to:
 # 1. Check Cricsheet for new data (ETag caching)
 # 2. Download new JSON files
-# 3. Update the DuckDB database
-# 4. Re-export parquet files
+# 3. Parse JSON directly to data frames (NO DuckDB needed!)
+# 4. Export to parquet files
 # 5. Upload to GitHub Release
 #
 # Prerequisites:
-# - bouncer package installed via micromamba
+# - bouncer package installed (duckdb NOT required)
+# - arrow package installed
+# - gh CLI installed and authenticated
 # - GITHUB_PAT environment variable set
-# - R_ZIPCMD set to /usr/bin/zip
 #
 # Usage: Run via cron at 7 AM UTC daily
 #   0 7 * * * /home/opc/bouncer-scraper/run_scrape.sh
 
 library(bouncer)
-library(piggyback)
+library(arrow)
 library(cli)
 library(httr2)
 library(jsonlite)
-library(duckdb)
-library(arrow)
 
 # ============================================================
 # CONFIGURATION
@@ -30,8 +29,8 @@ library(arrow)
 
 REPO <- "peteowen1/bouncerdata"
 DATA_DIR <- Sys.getenv("BOUNCER_DATA_DIR", "~/bouncer-scraper/data")
-DB_PATH <- file.path(DATA_DIR, "bouncer.duckdb")
 PARQUET_DIR <- file.path(DATA_DIR, "parquet")
+JSON_DIR <- file.path(DATA_DIR, "json_files")
 ETAG_CACHE <- file.path(DATA_DIR, "etag_cache.json")
 
 # Cricsheet URLs
@@ -80,8 +79,7 @@ check_cricsheet_updates <- function() {
 download_cricsheet_data <- function() {
   cli_h2("Downloading Cricsheet data")
 
-  json_dir <- file.path(DATA_DIR, "json_files")
-  dir.create(json_dir, showWarnings = FALSE, recursive = TRUE)
+  dir.create(JSON_DIR, showWarnings = FALSE, recursive = TRUE)
 
   # Download ZIP
   zip_path <- tempfile(fileext = ".zip")
@@ -96,217 +94,151 @@ download_cricsheet_data <- function() {
 
   # Extract
   cli_alert_info("Extracting...")
-  unzip(zip_path, exdir = json_dir, overwrite = TRUE)
+  unzip(zip_path, exdir = JSON_DIR, overwrite = TRUE)
   file.remove(zip_path)
 
-  n_files <- length(list.files(json_dir, pattern = "\\.json$", recursive = TRUE))
+  n_files <- length(list.files(JSON_DIR, pattern = "\\.json$", recursive = TRUE))
   cli_alert_success("Extracted {n_files} JSON files")
 
-  return(json_dir)
+  return(JSON_DIR)
 }
 
-#' Update DuckDB database with new matches
-update_database <- function(json_dir) {
-  cli_h2("Updating database")
+#' Parse all JSON files directly to data frames (NO DuckDB!)
+parse_all_matches <- function(json_dir) {
+  cli_h2("Parsing JSON files")
 
   json_files <- list.files(json_dir, pattern = "\\.json$",
                            full.names = TRUE, recursive = TRUE)
 
-  cli_alert_info("Found {length(json_files)} JSON files")
+  cli_alert_info("Found {length(json_files)} JSON files to parse")
 
-  # Initialize or connect to database
-  if (!file.exists(DB_PATH)) {
-    cli_alert_info("Creating new database...")
-    initialize_bouncer_database(db_path = DB_PATH, overwrite = TRUE)
+  # Pre-allocate lists for combining
+  all_matches <- vector("list", length(json_files))
+  all_deliveries <- vector("list", length(json_files))
+  all_players <- vector("list", length(json_files))
+
+  # Progress bar
+  pb <- cli_progress_bar("Parsing", total = length(json_files))
+
+  for (i in seq_along(json_files)) {
+    tryCatch({
+      parsed <- parse_cricsheet_json(json_files[i])
+
+      all_matches[[i]] <- parsed$match_info
+      all_deliveries[[i]] <- parsed$deliveries
+      all_players[[i]] <- parsed$players
+
+    }, error = function(e) {
+      cli_alert_warning("Failed to parse {basename(json_files[i])}: {e$message}")
+    })
+
+    cli_progress_update(id = pb)
   }
 
-  # Batch load matches (handles duplicates)
-  cli_alert_info("Loading matches into database...")
-  batch_load_matches(json_files, db_path = DB_PATH, progress = TRUE)
+  cli_progress_done(id = pb)
 
-  # Get stats
-  con <- dbConnect(duckdb(), DB_PATH, read_only = TRUE)
-  on.exit(dbDisconnect(con, shutdown = TRUE))
+  # Combine all data frames
+  cli_alert_info("Combining data frames...")
 
-  n_matches <- dbGetQuery(con, "SELECT COUNT(*) as n FROM matches")$n
-  n_deliveries <- dbGetQuery(con, "SELECT COUNT(*) as n FROM deliveries")$n
+  matches_df <- do.call(rbind, Filter(function(x) nrow(x) > 0, all_matches))
+  deliveries_df <- do.call(rbind, Filter(function(x) nrow(x) > 0, all_deliveries))
+  players_df <- do.call(rbind, Filter(function(x) nrow(x) > 0, all_players))
 
-  cli_alert_success("Database updated: {n_matches} matches, {n_deliveries} deliveries")
+  # Deduplicate players
+  players_df <- players_df[!duplicated(players_df$player_id), ]
+
+  cli_alert_success("Parsed: {nrow(matches_df)} matches, {nrow(deliveries_df)} deliveries, {nrow(players_df)} players")
+
+  list(
+    matches = matches_df,
+    deliveries = deliveries_df,
+    players = players_df
+  )
 }
 
 #' Export tables to parquet (unified structure)
-export_parquets <- function() {
+export_parquets <- function(data) {
   cli_h2("Exporting to Parquet")
 
   dir.create(PARQUET_DIR, showWarnings = FALSE, recursive = TRUE)
-
-  con <- dbConnect(duckdb(), DB_PATH, read_only = TRUE)
-  on.exit(dbDisconnect(con, shutdown = TRUE))
-
-  tables <- dbListTables(con)
   export_count <- 0
 
-  # ============================================================
-  # CORE TABLES (unified)
-  # ============================================================
-
   # Matches
-  data <- dbGetQuery(con, "SELECT * FROM matches")
-  if (nrow(data) > 0) {
-    write_parquet(data, file.path(PARQUET_DIR, "matches.parquet"), compression = "zstd")
+  if (!is.null(data$matches) && nrow(data$matches) > 0) {
+    write_parquet(data$matches, file.path(PARQUET_DIR, "matches.parquet"), compression = "zstd")
     export_count <- export_count + 1
-    cli_alert_success("  matches.parquet: {nrow(data)} rows")
+    cli_alert_success("  matches.parquet: {nrow(data$matches)} rows")
   }
 
-  # Deliveries (with team_type from matches)
-  data <- dbGetQuery(con, "
-    SELECT d.*, m.team_type
-    FROM deliveries d
-    LEFT JOIN matches m ON d.match_id = m.match_id
-  ")
-  if (nrow(data) > 0) {
-    write_parquet(data, file.path(PARQUET_DIR, "deliveries.parquet"), compression = "zstd")
+  # Deliveries (add team_type from matches)
+  if (!is.null(data$deliveries) && nrow(data$deliveries) > 0) {
+    # Join team_type from matches
+    deliveries_with_type <- merge(
+      data$deliveries,
+      data$matches[, c("match_id", "team_type")],
+      by = "match_id",
+      all.x = TRUE
+    )
+    write_parquet(deliveries_with_type, file.path(PARQUET_DIR, "deliveries.parquet"), compression = "zstd")
     export_count <- export_count + 1
-    cli_alert_success("  deliveries.parquet: {nrow(data)} rows")
+    cli_alert_success("  deliveries.parquet: {nrow(deliveries_with_type)} rows")
   }
 
   # Players
-  if ("players" %in% tables) {
-    data <- dbGetQuery(con, "SELECT * FROM players")
-    if (nrow(data) > 0) {
-      write_parquet(data, file.path(PARQUET_DIR, "players.parquet"), compression = "zstd")
-      export_count <- export_count + 1
-    }
-  }
-
-  # Team ELO
-  if ("team_elo" %in% tables) {
-    data <- dbGetQuery(con, "SELECT * FROM team_elo")
-    if (nrow(data) > 0) {
-      write_parquet(data, file.path(PARQUET_DIR, "team_elo.parquet"), compression = "zstd")
-      export_count <- export_count + 1
-    }
-  }
-
-  # ============================================================
-  # RATING TABLES (in subdirectories)
-  # ============================================================
-
-  # Player ratings
-  player_dir <- file.path(PARQUET_DIR, "player_rating")
-  dir.create(player_dir, showWarnings = FALSE)
-  for (tbl in c("test_player_skill", "odi_player_skill", "t20_player_skill")) {
-    if (tbl %in% tables) {
-      data <- dbGetQuery(con, sprintf("SELECT * FROM %s", tbl))
-      if (nrow(data) > 0) {
-        write_parquet(data, file.path(player_dir, paste0(tbl, ".parquet")), compression = "zstd")
-        export_count <- export_count + 1
-      }
-    }
-  }
-
-  # Team ratings
-  team_dir <- file.path(PARQUET_DIR, "team_rating")
-  dir.create(team_dir, showWarnings = FALSE)
-  for (tbl in c("test_team_skill", "odi_team_skill", "t20_team_skill")) {
-    if (tbl %in% tables) {
-      data <- dbGetQuery(con, sprintf("SELECT * FROM %s", tbl))
-      if (nrow(data) > 0) {
-        write_parquet(data, file.path(team_dir, paste0(tbl, ".parquet")), compression = "zstd")
-        export_count <- export_count + 1
-      }
-    }
-  }
-
-  # Venue ratings
-  venue_dir <- file.path(PARQUET_DIR, "venue_rating")
-  dir.create(venue_dir, showWarnings = FALSE)
-  for (tbl in c("test_venue_skill", "odi_venue_skill", "t20_venue_skill")) {
-    if (tbl %in% tables) {
-      data <- dbGetQuery(con, sprintf("SELECT * FROM %s", tbl))
-      if (nrow(data) > 0) {
-        write_parquet(data, file.path(venue_dir, paste0(tbl, ".parquet")), compression = "zstd")
-        export_count <- export_count + 1
-      }
-    }
+  if (!is.null(data$players) && nrow(data$players) > 0) {
+    write_parquet(data$players, file.path(PARQUET_DIR, "players.parquet"), compression = "zstd")
+    export_count <- export_count + 1
+    cli_alert_success("  players.parquet: {nrow(data$players)} rows")
   }
 
   cli_alert_success("Exported {export_count} parquet files")
 }
 
 #' Upload parquets to GitHub Release using gh CLI
-#' Uploads to 4 separate releases: core, player_rating, team_rating, venue_rating
 upload_to_github <- function() {
   cli_h2("Uploading to GitHub")
 
-  # Release configurations
-  releases <- list(
-    list(
-      tag = "core",
-      title = "Core Data",
-      files = c("matches.parquet", "deliveries.parquet", "players.parquet", "team_elo.parquet"),
-      dir = PARQUET_DIR
-    ),
-    list(
-      tag = "player_rating",
-      title = "Player Ratings",
-      files = c("test_player_skill.parquet", "odi_player_skill.parquet", "t20_player_skill.parquet"),
-      dir = file.path(PARQUET_DIR, "player_rating")
-    ),
-    list(
-      tag = "team_rating",
-      title = "Team Ratings",
-      files = c("test_team_skill.parquet", "odi_team_skill.parquet", "t20_team_skill.parquet"),
-      dir = file.path(PARQUET_DIR, "team_rating")
-    ),
-    list(
-      tag = "venue_rating",
-      title = "Venue Ratings",
-      files = c("test_venue_skill.parquet", "odi_venue_skill.parquet", "t20_venue_skill.parquet"),
-      dir = file.path(PARQUET_DIR, "venue_rating")
-    )
+  # Core release only (no ratings - those require DuckDB/full pipeline)
+  files <- c("matches.parquet", "deliveries.parquet", "players.parquet")
+  file_paths <- file.path(PARQUET_DIR, files)
+  existing_files <- file_paths[file.exists(file_paths)]
+
+  if (length(existing_files) == 0) {
+    cli_alert_warning("No parquet files found to upload")
+    return(invisible(FALSE))
+  }
+
+  cli_alert_info("Uploading {length(existing_files)} files to 'core' release...")
+
+  # Build file arguments
+  files_arg <- paste(shQuote(existing_files), collapse = " ")
+
+  # Delete existing release (ignore errors if doesn't exist)
+  system2("gh", c("release", "delete", "core", "--repo", REPO, "--yes"),
+          stdout = FALSE, stderr = FALSE)
+
+  # Create release with files
+  cmd <- sprintf(
+    "gh release create core %s --repo %s --title %s --notes %s",
+    files_arg,
+    REPO,
+    shQuote("Core Data"),
+    shQuote(sprintf("Updated: %s", format(Sys.time(), "%Y-%m-%d %H:%M UTC")))
   )
 
-  for (rel in releases) {
-    cli_alert_info("Uploading to {rel$tag}...")
+  result <- system(cmd)
 
-    # Get full paths to files that exist
-    file_paths <- file.path(rel$dir, rel$files)
-    existing_files <- file_paths[file.exists(file_paths)]
-
-    if (length(existing_files) == 0) {
-      cli_alert_warning("  No files found for {rel$tag}, skipping")
-      next
-    }
-
-    # Build gh command - delete and recreate release to ensure clean state
-    files_arg <- paste(shQuote(existing_files), collapse = " ")
-
-    # Try to delete existing release first (ignore errors if it doesn't exist)
-    system2("gh", c("release", "delete", rel$tag, "--repo", REPO, "--yes"),
-            stdout = FALSE, stderr = FALSE)
-
-    # Create release with files
-    cmd <- sprintf(
-      "gh release create %s %s --repo %s --title %s --notes %s",
-      rel$tag,
-      files_arg,
-      REPO,
-      shQuote(rel$title),
-      shQuote(sprintf("Updated: %s", format(Sys.time(), "%Y-%m-%d %H:%M UTC")))
-    )
-
-    result <- system(cmd)
-
-    if (result == 0) {
-      cli_alert_success("  Uploaded {length(existing_files)} files to {rel$tag}")
-    } else {
-      cli_alert_danger("  Failed to upload {rel$tag}")
-    }
+  if (result == 0) {
+    cli_alert_success("Uploaded {length(existing_files)} files to core release")
+  } else {
+    cli_alert_danger("Failed to upload to GitHub")
+    return(invisible(FALSE))
   }
 
   cli_alert_success("Upload complete!")
-  cli_alert_info("Releases: https://github.com/{REPO}/releases")
+  cli_alert_info("Release: https://github.com/{REPO}/releases/tag/core")
+
+  invisible(TRUE)
 }
 
 # ============================================================
@@ -330,11 +262,11 @@ if (!has_updates) {
 # Step 2: Download new data
 json_dir <- download_cricsheet_data()
 
-# Step 3: Update database
-update_database(json_dir)
+# Step 3: Parse JSON to data frames (NO DuckDB!)
+data <- parse_all_matches(json_dir)
 
 # Step 4: Export parquets
-export_parquets()
+export_parquets(data)
 
 # Step 5: Upload to GitHub
 upload_to_github()
