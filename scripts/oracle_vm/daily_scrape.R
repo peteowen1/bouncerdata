@@ -63,9 +63,12 @@ check_cricsheet_updates <- function() {
     req_perform()
 
   new_etag <- resp_header(resp, "ETag")
+  if (is.null(new_etag)) new_etag <- ""
   cli_alert_info("Current ETag: {new_etag}")
 
-  if (!is.null(old_etag) && old_etag == new_etag) {
+  # Compare ETags (both must be non-empty strings to match)
+  old_etag_str <- if (is.null(old_etag)) "" else old_etag
+  if (nchar(old_etag_str) > 0 && nchar(new_etag) > 0 && old_etag_str == new_etag) {
     cli_alert_success("No new data available")
     return(FALSE)
   }
