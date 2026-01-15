@@ -22,6 +22,7 @@ library(arrow)
 library(cli)
 library(httr2)
 library(jsonlite)
+library(piggyback)
 
 # ============================================================
 # CONFIGURATION
@@ -194,7 +195,7 @@ export_parquets <- function(data) {
   cli_alert_success("Exported {export_count} parquet files")
 }
 
-#' Upload parquets to GitHub Release using gh CLI
+#' Upload parquets to GitHub Release using piggyback
 upload_to_github <- function() {
   cli_h2("Uploading to GitHub")
 
@@ -210,29 +211,29 @@ upload_to_github <- function() {
 
   cli_alert_info("Uploading {length(existing_files)} files to 'core' release...")
 
-  # Build file arguments
-  files_arg <- paste(shQuote(existing_files), collapse = " ")
+  # Ensure release exists (piggyback will create if needed)
+  tryCatch({
+    pb_release_create(repo = REPO, tag = "core")
+    cli_alert_info("Created 'core' release")
+  }, error = function(e) {
+    # Release already exists, that's fine
+    cli_alert_info("Release 'core' already exists")
+  })
 
-  # Delete existing release (ignore errors if doesn't exist)
-  system2("gh", c("release", "delete", "core", "--repo", REPO, "--yes"),
-          stdout = FALSE, stderr = FALSE)
-
-  # Create release with files
-  cmd <- sprintf(
-    "gh release create core %s --repo %s --title %s --notes %s",
-    files_arg,
-    REPO,
-    shQuote("Core Data"),
-    shQuote(sprintf("Updated: %s", format(Sys.time(), "%Y-%m-%d %H:%M UTC")))
-  )
-
-  result <- system(cmd)
-
-  if (result == 0) {
-    cli_alert_success("Uploaded {length(existing_files)} files to core release")
-  } else {
-    cli_alert_danger("Failed to upload to GitHub")
-    return(invisible(FALSE))
+  # Upload each file (overwrites existing)
+  for (file_path in existing_files) {
+    cli_alert_info("  Uploading {basename(file_path)}...")
+    tryCatch({
+      pb_upload(
+        file = file_path,
+        repo = REPO,
+        tag = "core",
+        overwrite = TRUE
+      )
+      cli_alert_success("  Uploaded {basename(file_path)}")
+    }, error = function(e) {
+      cli_alert_danger("  Failed to upload {basename(file_path)}: {e$message}")
+    })
   }
 
   cli_alert_success("Upload complete!")
