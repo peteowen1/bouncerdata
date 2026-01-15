@@ -36,7 +36,9 @@ ETAG_CACHE <- file.path(DATA_DIR, "etag_cache.json")
 
 # Cricsheet URLs
 CRICSHEET_BASE <- "https://cricsheet.org/downloads"
-CRICSHEET_ALL_JSON <- paste0(CRICSHEET_BASE, "/all_json.zip")
+# Use recently_added_7 (added in last 7 days) for efficient daily updates
+# This catches matches added late, not just recently played
+CRICSHEET_RECENT_JSON <- paste0(CRICSHEET_BASE, "/recently_added_7_json.zip")
 
 # ============================================================
 # HELPER FUNCTIONS
@@ -55,7 +57,7 @@ check_cricsheet_updates <- function() {
   }
 
   # HEAD request to check current ETag
-  resp <- request(CRICSHEET_ALL_JSON) |>
+  resp <- request(CRICSHEET_RECENT_JSON) |>
     req_method("HEAD") |>
     req_timeout(30) |>
     req_perform()
@@ -86,7 +88,7 @@ download_cricsheet_data <- function() {
   zip_path <- tempfile(fileext = ".zip")
   cli_alert_info("Downloading all_json.zip...")
 
-  resp <- request(CRICSHEET_ALL_JSON) |>
+  resp <- request(CRICSHEET_RECENT_JSON) |>
     req_timeout(600) |>
     req_perform(path = zip_path)
 
@@ -242,15 +244,90 @@ upload_to_github <- function() {
   invisible(TRUE)
 }
 
+#' Download existing parquet data from GitHub
+download_existing_data <- function() {
+  cli_h2("Downloading existing data from GitHub")
+
+  existing_data <- list(matches = NULL, deliveries = NULL, players = NULL)
+
+  for (file in c("matches.parquet", "deliveries.parquet", "players.parquet")) {
+    local_path <- file.path(PARQUET_DIR, file)
+
+    tryCatch({
+      pb_download(
+        file = file,
+        repo = REPO,
+        tag = "core",
+        dest = PARQUET_DIR,
+        overwrite = TRUE
+      )
+
+      if (file.exists(local_path)) {
+        name <- gsub("\\.parquet$", "", file)
+        existing_data[[name]] <- read_parquet(local_path)
+        cli_alert_success("  {file}: {nrow(existing_data[[name]])} rows")
+      }
+    }, error = function(e) {
+      cli_alert_warning("  {file}: not found (first run?)")
+    })
+  }
+
+  existing_data
+}
+
+#' Merge new data with existing data (deduplicating by match_id)
+merge_data <- function(existing, new_data) {
+  cli_h2("Merging with existing data")
+
+  result <- list()
+
+  # Merge matches
+  if (!is.null(existing$matches) && nrow(existing$matches) > 0) {
+    # Get new match IDs not in existing
+    new_match_ids <- setdiff(new_data$matches$match_id, existing$matches$match_id)
+    new_matches <- new_data$matches[new_data$matches$match_id %in% new_match_ids, ]
+    result$matches <- rbind(existing$matches, new_matches)
+    cli_alert_info("  Matches: {nrow(existing$matches)} existing + {nrow(new_matches)} new = {nrow(result$matches)}")
+  } else {
+    result$matches <- new_data$matches
+    cli_alert_info("  Matches: {nrow(result$matches)} (all new)")
+  }
+
+  # Merge deliveries
+  if (!is.null(existing$deliveries) && nrow(existing$deliveries) > 0) {
+    new_match_ids <- setdiff(unique(new_data$deliveries$match_id), unique(existing$deliveries$match_id))
+    new_deliveries <- new_data$deliveries[new_data$deliveries$match_id %in% new_match_ids, ]
+    result$deliveries <- rbind(existing$deliveries, new_deliveries)
+    cli_alert_info("  Deliveries: {nrow(existing$deliveries)} existing + {nrow(new_deliveries)} new = {nrow(result$deliveries)}")
+  } else {
+    result$deliveries <- new_data$deliveries
+    cli_alert_info("  Deliveries: {nrow(result$deliveries)} (all new)")
+  }
+
+  # Merge players (dedupe by player_id)
+  if (!is.null(existing$players) && nrow(existing$players) > 0) {
+    all_players <- rbind(existing$players, new_data$players)
+    result$players <- all_players[!duplicated(all_players$player_id), ]
+    cli_alert_info("  Players: {nrow(result$players)} unique")
+  } else {
+    result$players <- new_data$players[!duplicated(new_data$players$player_id), ]
+    cli_alert_info("  Players: {nrow(result$players)} (all new)")
+  }
+
+  result
+}
+
 # ============================================================
 # MAIN EXECUTION
 # ============================================================
 
 cli_h1("Bouncer Daily Scrape")
 cli_alert_info("Started at: {format(Sys.time(), '%Y-%m-%d %H:%M:%S %Z')}")
+cli_alert_info("Using: recently_added_7_json (added in last 7 days)")
 
 # Ensure data directory exists
 dir.create(DATA_DIR, showWarnings = FALSE, recursive = TRUE)
+dir.create(PARQUET_DIR, showWarnings = FALSE, recursive = TRUE)
 
 # Step 1: Check for updates
 has_updates <- check_cricsheet_updates()
@@ -260,16 +337,22 @@ if (!has_updates) {
   quit(save = "no", status = 0)
 }
 
-# Step 2: Download new data
+# Step 2: Download existing data from GitHub
+existing_data <- download_existing_data()
+
+# Step 3: Download new JSON data (last 30 days)
 json_dir <- download_cricsheet_data()
 
-# Step 3: Parse JSON to data frames (NO DuckDB!)
-data <- parse_all_matches(json_dir)
+# Step 4: Parse JSON to data frames
+new_data <- parse_all_matches(json_dir)
 
-# Step 4: Export parquets
-export_parquets(data)
+# Step 5: Merge new with existing
+merged_data <- merge_data(existing_data, new_data)
 
-# Step 5: Upload to GitHub
+# Step 6: Export parquets
+export_parquets(merged_data)
+
+# Step 7: Upload to GitHub
 upload_to_github()
 
 cli_h1("Complete!")
