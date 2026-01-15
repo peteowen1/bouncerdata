@@ -218,7 +218,7 @@ upload_to_github <- function() {
 
   # Ensure release exists (piggyback will create if needed)
   tryCatch({
-    pb_release_create(repo = REPO, tag = "core")
+    pb_release_create(repo = REPO, tag = "recent")
     cli_alert_info("Created 'core' release")
   }, error = function(e) {
     # Release already exists, that's fine
@@ -232,7 +232,7 @@ upload_to_github <- function() {
       pb_upload(
         file = file_path,
         repo = REPO,
-        tag = "core",
+        tag = "recent",
         overwrite = TRUE
       )
       cli_alert_success("  Uploaded {basename(file_path)}")
@@ -242,7 +242,7 @@ upload_to_github <- function() {
   }
 
   cli_alert_success("Upload complete!")
-  cli_alert_info("Release: https://github.com/{REPO}/releases/tag/core")
+  cli_alert_info("Release: https://github.com/{REPO}/releases/tag/recent")
 
   invisible(TRUE)
 }
@@ -260,7 +260,7 @@ download_existing_data <- function() {
       pb_download(
         file = file,
         repo = REPO,
-        tag = "core",
+        tag = "recent",
         dest = PARQUET_DIR,
         overwrite = TRUE
       )
@@ -340,22 +340,19 @@ if (!has_updates) {
   quit(save = "no", status = 0)
 }
 
-# Step 2: Download existing data from GitHub
-existing_data <- download_existing_data()
-
-# Step 3: Download new JSON data (last 30 days)
+# Step 2: Download new JSON data (last 7 days)
+# NOTE: Like panna, we do incremental-only updates on the VM.
+# The full "core" dataset was seeded from a local machine.
+# VM just uploads recent matches to "recent" tag.
 json_dir <- download_cricsheet_data()
 
-# Step 4: Parse JSON to data frames
+# Step 3: Parse JSON to data frames
 new_data <- parse_all_matches(json_dir)
 
-# Step 5: Merge new with existing
-merged_data <- merge_data(existing_data, new_data)
+# Step 4: Export parquets (just recent data)
+export_parquets(new_data)
 
-# Step 6: Export parquets
-export_parquets(merged_data)
-
-# Step 7: Upload to GitHub
+# Step 5: Upload to "recent" tag (not "core")
 upload_to_github()
 
 cli_h1("Complete!")
