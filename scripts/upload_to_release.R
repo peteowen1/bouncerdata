@@ -57,19 +57,18 @@ RELEASE_CONFIG <- list(
   )
 )
 
-# Set up GitHub token
+#' Set up GitHub token from environment or file
 setup_github_token <- function() {
-  if (Sys.getenv("GITHUB_PAT") != "") {
+  if (nzchar(Sys.getenv("GITHUB_PAT"))) {
     cli_alert_success("Using GITHUB_PAT from environment")
-    return(invisible(NULL))
+    return(invisible())
   }
 
   pat_file <- path.expand("~/.github_pat")
   if (file.exists(pat_file)) {
-    pat <- trimws(readLines(pat_file, n = 1, warn = FALSE))
-    Sys.setenv(GITHUB_PAT = pat)
+    Sys.setenv(GITHUB_PAT = trimws(readLines(pat_file, n = 1, warn = FALSE)))
     cli_alert_success("Using token from ~/.github_pat")
-    return(invisible(NULL))
+    return(invisible())
   }
 
   cli_abort("No GitHub token found. Set GITHUB_PAT or create ~/.github_pat")

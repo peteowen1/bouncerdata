@@ -65,31 +65,21 @@ create_folder_zip <- function(folder_name) {
 
 #' Create manifest with all release info
 create_manifest <- function(zip_info_list) {
+  folders <- Filter(Negate(is.null), lapply(zip_info_list, function(info) {
+    if (is.null(info)) return(NULL)
+    list(name = info$folder, file_count = info$file_count, size_bytes = info$size_bytes)
+  }))
+
   manifest <- list(
     created_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
     release_date = format(Sys.Date(), "%Y.%m.%d"),
-    folders = lapply(zip_info_list, function(info) {
-      if (is.null(info)) return(NULL)
-      list(
-        name = info$folder,
-        file_count = info$file_count,
-        size_bytes = info$size_bytes
-      )
-    })
+    folders = folders,
+    total_matches = sum(sapply(folders, `[[`, "file_count")),
+    total_size_bytes = sum(sapply(folders, `[[`, "size_bytes"))
   )
 
-  # Remove NULLs
-  manifest$folders <- Filter(Negate(is.null), manifest$folders)
-
-  # Calculate totals
-  manifest$total_matches <- sum(sapply(manifest$folders, `[[`, "file_count"))
-  manifest$total_size_bytes <- sum(sapply(manifest$folders, `[[`, "size_bytes"))
-
-  manifest_path <- file.path(OUTPUT_DIR, "manifest.json")
-  write_json(manifest, manifest_path, auto_unbox = TRUE, pretty = TRUE)
-
+  write_json(manifest, file.path(OUTPUT_DIR, "manifest.json"), auto_unbox = TRUE, pretty = TRUE)
   cli_alert_success("Created manifest.json")
-
   manifest
 }
 

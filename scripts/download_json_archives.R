@@ -10,58 +10,42 @@ library(cli)
 REPO <- "peteowen1/bouncerdata"
 OUTPUT_DIR <- "json_temp"
 
+#' Add GitHub token to request if available
+add_github_auth <- function(req) {
+  token <- Sys.getenv("GITHUB_TOKEN")
+  if (nzchar(token)) req <- req |> req_auth_bearer_token(token)
+  req
+}
+
 #' Get latest release info from GitHub API
 get_latest_release <- function() {
   cli_h2("Getting latest release info")
 
-  url <- sprintf("https://api.github.com/repos/%s/releases/latest", REPO)
+  resp <- request(sprintf("https://api.github.com/repos/%s/releases/latest", REPO)) |>
+    req_headers(Accept = "application/vnd.github.v3+json") |>
+    add_github_auth() |>
+    req_perform()
 
-  # Use GITHUB_TOKEN if available (for rate limiting)
-  token <- Sys.getenv("GITHUB_TOKEN")
-
-  req <- request(url) |>
-    req_headers(Accept = "application/vnd.github.v3+json")
-
-  if (nzchar(token)) {
-    req <- req |> req_auth_bearer_token(token)
-  }
-
-  resp <- req_perform(req)
   release <- resp_body_json(resp)
-
   cli_alert_info("Latest release: {release$tag_name}")
   cli_alert_info("Published: {release$published_at}")
   cli_alert_info("Assets: {length(release$assets)}")
-
   release
 }
 
 #' Download a release asset
 download_asset <- function(asset, output_dir) {
-  name <- asset$name
-  url <- asset$browser_download_url
-  size_mb <- asset$size / 1024 / 1024
+  cli_alert_info("Downloading {asset$name} ({round(asset$size / 1024 / 1024, 1)} MB)...")
 
-  cli_alert_info("Downloading {name} ({round(size_mb, 1)} MB)...")
+  dest_path <- file.path(output_dir, asset$name)
 
-  dest_path <- file.path(output_dir, name)
-
-  # Use GITHUB_TOKEN for private repos
-  token <- Sys.getenv("GITHUB_TOKEN")
-
-  req <- request(url) |>
-    req_timeout(600)
-
-  if (nzchar(token)) {
-    req <- req |> req_auth_bearer_token(token)
-  }
-
-  req |>
+  request(asset$browser_download_url) |>
+    req_timeout(600) |>
+    add_github_auth() |>
     req_progress() |>
     req_perform(path = dest_path)
 
   cli_alert_success("Downloaded: {dest_path}")
-
   dest_path
 }
 

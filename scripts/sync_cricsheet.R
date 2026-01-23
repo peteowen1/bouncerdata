@@ -6,43 +6,30 @@ library(jsonlite)
 library(zip)
 library(cli)
 
+# Null coalescing operator
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
 # Configuration
 CRICSHEET_URL <- "https://cricsheet.org/downloads/all_json.zip"
 TEMP_DIR <- "json_temp"
 OUTPUT_DIR <- "classified_json"
 
-# Data organization folders
 DATA_FOLDERS <- c(
-  "long_form_male_international",
-  "long_form_male_club",
-  "long_form_female_international",
-  "long_form_female_club",
-  "short_form_male_international",
-  "short_form_male_club",
-  "short_form_female_international",
-  "short_form_female_club"
+  "long_form_male_international", "long_form_male_club",
+  "long_form_female_international", "long_form_female_club",
+  "short_form_male_international", "short_form_male_club",
+  "short_form_female_international", "short_form_female_club"
 )
 
-# Format classification
+# Classification constants
 FORMAT_LONG_FORM <- c("Test", "MDM")
 MATCH_TYPE_INTERNATIONAL <- c("Test", "ODI", "IT20")
 
-#' Get format category
-get_format_category <- function(match_type) {
-  if (match_type %in% FORMAT_LONG_FORM) "long_form" else "short_form"
-}
-
-#' Get match type category
-get_match_type_category <- function(match_type) {
-  if (match_type %in% MATCH_TYPE_INTERNATIONAL) "international" else "club"
-}
-
 #' Classify a match into one of 8 folders
 classify_match <- function(match_type, gender) {
-  format_cat <- get_format_category(match_type)
-  type_cat <- get_match_type_category(match_type)
-  gender <- gender %||% "male"
-  paste(format_cat, gender, type_cat, sep = "_")
+  format_cat <- if (match_type %in% FORMAT_LONG_FORM) "long_form" else "short_form"
+  type_cat <- if (match_type %in% MATCH_TYPE_INTERNATIONAL) "international" else "club"
+  paste(format_cat, gender %||% "male", type_cat, sep = "_")
 }
 
 #' Download Cricsheet all_json.zip

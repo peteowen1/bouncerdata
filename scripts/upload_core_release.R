@@ -24,12 +24,7 @@ library(cli)
 REPO <- "peteowen1/bouncerdata"
 
 # Default parquet directory (relative to bouncerverse/)
-DEFAULT_PARQUET_DIR <- file.path(
-
-  dirname(dirname(getwd())),  # Go up from scripts/ to bouncerdata/
-
-  "parquet"
-)
+DEFAULT_PARQUET_DIR <- file.path(dirname(dirname(getwd())), "parquet")
 
 # Allow override via command line arg
 args <- commandArgs(trailingOnly = TRUE)
@@ -91,19 +86,12 @@ if (interactive()) {
 cli_h2("Creating ZIP archive")
 
 zip_file <- tempfile(fileext = ".zip")
-if (file.exists(zip_file)) file.remove(zip_file)
-
 old_wd <- getwd()
 on.exit(setwd(old_wd), add = TRUE)
 setwd(PARQUET_DIR)
 
-# Create zip with relative paths
-rel_files <- basename(parquet_files)
-zip_result <- zip(zip_file, files = rel_files, flags = "-rq")
-
-if (zip_result != 0) {
-  cli_abort("Failed to create ZIP archive")
-}
+zip_result <- zip(zip_file, files = basename(parquet_files), flags = "-rq")
+if (zip_result != 0) cli_abort("Failed to create ZIP archive")
 
 zip_size <- file.size(zip_file) / 1024 / 1024
 cli_alert_success("Created ZIP: {round(zip_size, 1)} MB")
@@ -126,29 +114,24 @@ tryCatch({
 # Upload with retry
 cli_alert_info("Uploading bouncerdata-parquet.zip...")
 
+max_attempts <- 3
 success <- FALSE
-for (attempt in 1:3) {
-  success <- tryCatch({
-    pb_upload(
-      file = zip_file,
-      repo = REPO,
-      tag = "core",
-      name = "bouncerdata-parquet.zip",
-      overwrite = TRUE
-    )
+for (attempt in seq_len(max_attempts)) {
+  result <- tryCatch({
+    pb_upload(file = zip_file, repo = REPO, tag = "core", name = "bouncerdata-parquet.zip", overwrite = TRUE)
     TRUE
   }, error = function(e) {
-    if (attempt < 3) {
-      cli_alert_warning("Attempt {attempt} failed: {e$message}")
+    cli_alert_warning("Attempt {attempt} failed: {e$message}")
+    if (attempt < max_attempts) {
       cli_alert_info("Retrying in 5 seconds...")
       Sys.sleep(5)
-    } else {
-      cli_alert_danger("Final attempt failed: {e$message}")
     }
     FALSE
   })
-
-  if (success) break
+  if (result) {
+    success <- TRUE
+    break
+  }
 }
 
 # ============================================================

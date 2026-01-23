@@ -53,12 +53,10 @@ matches <- read_parquet(matches_path, col_select = c("match_id", "match_type", "
 cli_alert_success("Loaded {nrow(matches)} matches")
 
 # Create lookup: match_id -> partition_key
-matches <- matches |>
-  mutate(
-    partition_key = paste(match_type, gender, team_type, sep = "_")
-  )
-
-match_lookup <- setNames(matches$partition_key, matches$match_id)
+match_lookup <- setNames(
+  paste(matches$match_type, matches$gender, matches$team_type, sep = "_"),
+  matches$match_id
+)
 cli_alert_info("Created partition lookup for {length(match_lookup)} matches")
 
 # Backup old files
@@ -109,25 +107,19 @@ for (mt in OLD_MATCH_TYPES) {
     subset_del <- del[del$partition_key == pk, ]
     new_file <- file.path(PARQUET_DIR, paste0("deliveries_", pk, ".parquet"))
 
-    # If file exists (from previous match_type), append
     if (file.exists(new_file)) {
       existing <- read_parquet(new_file, as_data_frame = FALSE)
-      new_tbl <- arrow_table(subset_del)
-      combined <- concat_tables(existing, new_tbl)
+      combined <- concat_tables(existing, arrow_table(subset_del))
       write_parquet(combined, new_file, compression = "zstd")
       cli_alert_success("    {pk}: appended {nrow(subset_del)} -> {combined$num_rows} total")
-      rm(existing, new_tbl, combined)
     } else {
       write_parquet(subset_del, new_file, compression = "zstd")
       cli_alert_success("    {pk}: {nrow(subset_del)} rows (new)")
     }
   }
 
-  # Remove old file
   file.remove(old_file)
   cli_alert_info("  Removed old deliveries_{mt}.parquet")
-
-  rm(del)
   gc()
 }
 

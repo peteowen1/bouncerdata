@@ -12,59 +12,64 @@ library(arrow)
 library(jsonlite)
 library(cli)
 
+# Null coalescing operator
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
 # Configuration
 DB_PATH <- "bouncer.duckdb"
 OUTPUT_DIR <- "parquet"
 
 #' Export a table to Parquet
-#' @param con DuckDB connection
-#' @param table_name Table name in database
-#' @param output_path Output file path
 export_table <- function(con, table_name, output_path) {
-  query <- sprintf("SELECT * FROM %s", table_name)
-
   cli_alert_info("Exporting {basename(output_path)}...")
 
-  # Read data
-  data <- DBI::dbGetQuery(con, query)
+  data <- DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", table_name))
 
   if (nrow(data) == 0) {
     cli_alert_warning("  No data to export for {basename(output_path)}")
     return(NULL)
   }
 
-  # Write to Parquet with zstd compression
   write_parquet(data, output_path, compression = "zstd")
 
   size_mb <- file.size(output_path) / 1024 / 1024
   cli_alert_success("  {basename(output_path)}: {format(nrow(data), big.mark=',')} rows, {round(size_mb, 1)} MB")
 
-  list(
-    name = basename(output_path),
-    rows = nrow(data),
-    size_bytes = file.size(output_path)
-  )
+  list(name = basename(output_path), rows = nrow(data), size_bytes = file.size(output_path))
+}
+
+#' Export multiple skill tables
+export_skill_tables <- function(con, tables, prefix, available_tables, export_info) {
+  for (tbl in tables) {
+    if (tbl %in% available_tables) {
+      export_info[[tbl]] <- export_table(con, tbl, file.path(OUTPUT_DIR, paste0(tbl, ".parquet")))
+    }
+  }
+  export_info
 }
 
 #' Create manifest for parquet files
 create_manifest <- function(export_info) {
   manifest <- list(
     created_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
-    files = export_info
+    files = export_info,
+    total_rows = sum(sapply(export_info, function(x) x$rows %||% 0)),
+    total_size_bytes = sum(sapply(export_info, function(x) x$size_bytes %||% 0))
   )
 
-  manifest$total_rows <- sum(sapply(export_info, function(x) x$rows %||% 0))
-  manifest$total_size_bytes <- sum(sapply(export_info, function(x) x$size_bytes %||% 0))
-
-  manifest_path <- file.path(OUTPUT_DIR, "manifest.json")
-  write_json(manifest, manifest_path, auto_unbox = TRUE, pretty = TRUE)
-
+  write_json(manifest, file.path(OUTPUT_DIR, "manifest.json"), auto_unbox = TRUE, pretty = TRUE)
   cli_alert_success("Created manifest.json")
   manifest
 }
 
-# Null coalescing operator
-`%||%` <- function(x, y) if (is.null(x)) y else x
+#' Print file sizes for a category
+print_file_sizes <- function(files, label) {
+  cli_h3(label)
+  for (f in files) {
+    size_mb <- file.size(file.path(OUTPUT_DIR, f)) / 1024 / 1024
+    cli_alert_info("  {f}: {round(size_mb, 2)} MB")
+  }
+}
 
 # Main execution
 cli_h1("Exporting Tables to Parquet (Split by match_type/gender/team_type)")
@@ -179,38 +184,12 @@ if ("team_elo" %in% tables) {
 # ============================================================
 cli_h2("Exporting skill index tables")
 
-# Player skill tables
-player_skill_tables <- c("test_player_skill", "odi_player_skill", "t20_player_skill")
-for (tbl in player_skill_tables) {
-  if (tbl %in% tables) {
-    export_info[[tbl]] <- export_table(
-      con, tbl,
-      file.path(OUTPUT_DIR, paste0(tbl, ".parquet"))
-    )
-  }
-}
-
-# Team skill tables
-team_skill_tables <- c("test_team_skill", "odi_team_skill", "t20_team_skill")
-for (tbl in team_skill_tables) {
-  if (tbl %in% tables) {
-    export_info[[tbl]] <- export_table(
-      con, tbl,
-      file.path(OUTPUT_DIR, paste0(tbl, ".parquet"))
-    )
-  }
-}
-
-# Venue skill tables
-venue_skill_tables <- c("test_venue_skill", "odi_venue_skill", "t20_venue_skill")
-for (tbl in venue_skill_tables) {
-  if (tbl %in% tables) {
-    export_info[[tbl]] <- export_table(
-      con, tbl,
-      file.path(OUTPUT_DIR, paste0(tbl, ".parquet"))
-    )
-  }
-}
+skill_tables <- c(
+  "test_player_skill", "odi_player_skill", "t20_player_skill",
+  "test_team_skill", "odi_team_skill", "t20_team_skill",
+  "test_venue_skill", "odi_venue_skill", "t20_venue_skill"
+)
+export_info <- export_skill_tables(con, skill_tables, "", tables, export_info)
 
 # ============================================================
 # CREATE MANIFEST
@@ -228,31 +207,9 @@ cli_alert_info("Total files: {length(parquet_files)}")
 cli_alert_info("Total rows: {format(manifest$total_rows, big.mark=',')}")
 cli_alert_info("Total size: {round(manifest$total_size_bytes / 1024 / 1024, 1)} MB")
 
-# List files by category
-cli_h3("Matches (split by match_type/gender/team_type)")
-matches_files <- grep("^matches_", parquet_files, value = TRUE)
-for (f in matches_files) {
-  size <- file.size(file.path(OUTPUT_DIR, f))
-  cli_alert_info("  {f}: {round(size / 1024 / 1024, 2)} MB")
-}
-
-cli_h3("Deliveries (split by match_type/gender/team_type)")
-deliveries_files <- grep("^deliveries_", parquet_files, value = TRUE)
-for (f in deliveries_files) {
-  size <- file.size(file.path(OUTPUT_DIR, f))
-  cli_alert_info("  {f}: {round(size / 1024 / 1024, 2)} MB")
-}
-
-cli_h3("Unified Tables")
-for (f in grep("^(players|team_elo)\\.parquet$", parquet_files, value = TRUE)) {
-  size <- file.size(file.path(OUTPUT_DIR, f))
-  cli_alert_info("  {f}: {round(size / 1024 / 1024, 2)} MB")
-}
-
-cli_h3("Skill Indices")
-for (f in grep("_skill\\.parquet$", parquet_files, value = TRUE)) {
-  size <- file.size(file.path(OUTPUT_DIR, f))
-  cli_alert_info("  {f}: {round(size / 1024 / 1024, 2)} MB")
-}
+print_file_sizes(grep("^matches_", parquet_files, value = TRUE), "Matches (split by match_type/gender/team_type)")
+print_file_sizes(grep("^deliveries_", parquet_files, value = TRUE), "Deliveries (split by match_type/gender/team_type)")
+print_file_sizes(grep("^(players|team_elo)\\.parquet$", parquet_files, value = TRUE), "Unified Tables")
+print_file_sizes(grep("_skill\\.parquet$", parquet_files, value = TRUE), "Skill Indices")
 
 cli_alert_success("Parquet export complete! {length(parquet_files)} files created.")
