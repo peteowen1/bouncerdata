@@ -19,3 +19,27 @@ json_files/
 .Rdata
 .RData
 *.Rproj.user
+
+# Claude Code
+.claude/
+CLAUDE.md
+tmpclaude-*
+.Rproj.user
+
+# Internal setup docs (not for repo)
+*_SETUP.md
+*_NOTES.md
+
+# SSH keys and secrets (never commit!)
+*.key
+*.pem
+ssh-key*
+*.github_pat
+.env
+.secrets
+
+# FOX Sports discovery cache
+fox_discovered_*.rds
+
+# RStudio project file
+*.Rproj

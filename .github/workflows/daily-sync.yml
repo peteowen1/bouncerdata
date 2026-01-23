@@ -1,0 +1,108 @@
+name: Daily Cricsheet Sync
+
+on:
+  schedule:
+    # Run at 6 AM UTC daily
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_download:
+        description: 'Force download even if no changes detected'
+        type: boolean
+        default: false
+
+jobs:
+  sync-cricsheet:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.4.0'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Install R dependencies
+        run: |
+          install.packages(c("httr2", "jsonlite", "zip", "cli"), repos = "https://cloud.r-project.org")
+        shell: Rscript {0}
+
+      - name: Check for Cricsheet updates
+        id: check
+        run: |
+          source("scripts/check_updates.R")
+        shell: Rscript {0}
+        env:
+          FORCE_DOWNLOAD: ${{ github.event.inputs.force_download }}
+
+      - name: Download and classify matches
+        if: env.NEEDS_UPDATE == 'true' || github.event.inputs.force_download == 'true'
+        run: |
+          source("scripts/sync_cricsheet.R")
+        shell: Rscript {0}
+
+      - name: Create release assets
+        if: env.NEEDS_UPDATE == 'true' || github.event.inputs.force_download == 'true'
+        run: |
+          source("scripts/create_release_assets.R")
+        shell: Rscript {0}
+
+      - name: Update manifest
+        if: env.NEEDS_UPDATE == 'true' || github.event.inputs.force_download == 'true'
+        run: |
+          # Commit updated manifest to repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add manifests/
+          git diff --staged --quiet || git commit -m "Update manifests [skip ci]"
+          git push
+
+      - name: Create GitHub Release
+        if: env.NEEDS_UPDATE == 'true' || github.event.inputs.force_download == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ env.RELEASE_DATE }}
+          name: Daily Sync - ${{ env.RELEASE_DATE }}
+          body: |
+            ## Daily Cricsheet Data Sync
+
+            **Date**: ${{ env.RELEASE_DATE }}
+            **New matches**: ${{ env.NEW_MATCH_COUNT }}
+            **Updated matches**: ${{ env.CHANGED_MATCH_COUNT }}
+
+            ### Data Folders
+            - long_form_male_international.zip
+            - long_form_male_club.zip
+            - long_form_female_international.zip
+            - long_form_female_club.zip
+            - short_form_male_international.zip
+            - short_form_male_club.zip
+            - short_form_female_international.zip
+            - short_form_female_club.zip
+
+            ### Installation
+            ```r
+            # In R, use the bouncer package:
+            bouncer::install_bouncerdata_from_release()
+            ```
+          files: |
+            release_assets/*.zip
+            release_assets/manifest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf release_assets/ json_temp/
