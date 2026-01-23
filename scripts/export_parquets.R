@@ -113,14 +113,11 @@ for (i in seq_len(nrow(combos))) {
   # Create filename: matches_T20_male_international.parquet
   suffix <- paste(mt, gen, tt, sep = "_")
 
-  # Export matches for this combination
-
-  matches_query <- sprintf("
+  # Export matches for this combination (using parameterized query for safety)
+  matches_data <- DBI::dbGetQuery(con, "
     SELECT * FROM matches
-    WHERE match_type = '%s' AND gender = '%s' AND team_type = '%s'
-  ", mt, gen, tt)
-
-  matches_data <- DBI::dbGetQuery(con, matches_query)
+    WHERE match_type = $1 AND gender = $2 AND team_type = $3
+  ", params = list(mt, gen, tt))
 
   if (nrow(matches_data) > 0) {
     matches_path <- file.path(OUTPUT_DIR, paste0("matches_", suffix, ".parquet"))
@@ -137,14 +134,13 @@ for (i in seq_len(nrow(combos))) {
 
   # Export deliveries for this combination (join to get team_type from matches)
   # Note: deliveries already has gender, so only add team_type
-  deliveries_query <- sprintf("
+  # Using parameterized query for safety
+  deliveries_data <- DBI::dbGetQuery(con, "
     SELECT d.*, m.team_type
     FROM deliveries d
     INNER JOIN matches m ON d.match_id = m.match_id
-    WHERE m.match_type = '%s' AND m.gender = '%s' AND m.team_type = '%s'
-  ", mt, gen, tt)
-
-  deliveries_data <- DBI::dbGetQuery(con, deliveries_query)
+    WHERE m.match_type = $1 AND m.gender = $2 AND m.team_type = $3
+  ", params = list(mt, gen, tt))
 
   if (nrow(deliveries_data) > 0) {
     deliveries_path <- file.path(OUTPUT_DIR, paste0("deliveries_", suffix, ".parquet"))
