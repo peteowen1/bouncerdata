@@ -1,9 +1,10 @@
 # export_parquets.R
 # Export DuckDB tables to Parquet files
 #
-# Exports unified tables:
-#   - matches.parquet (all matches)
-#   - deliveries.parquet (all ball-by-ball data)
+# Exports tables split by match_type/gender/team_type:
+#   - matches_{match_type}_{gender}_{team_type}.parquet
+#   - deliveries_{match_type}_{gender}_{team_type}.parquet
+# Plus unified tables:
 #   - players.parquet, team_elo.parquet, skill indices
 
 library(duckdb)
@@ -13,7 +14,7 @@ library(cli)
 
 # Configuration
 DB_PATH <- "bouncer.duckdb"
-OUTPUT_DIR <- "parquet_output"
+OUTPUT_DIR <- "parquet"
 
 #' Export a table to Parquet
 #' @param con DuckDB connection
@@ -66,7 +67,7 @@ create_manifest <- function(export_info) {
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
 # Main execution
-cli_h1("Exporting Tables to Parquet (Unified)")
+cli_h1("Exporting Tables to Parquet (Split by match_type/gender/team_type)")
 
 # Create output directory
 dir.create(OUTPUT_DIR, showWarnings = FALSE, recursive = TRUE)
@@ -83,40 +84,81 @@ export_info <- list()
 tables <- DBI::dbListTables(con)
 
 # ============================================================
-# CORE TABLES (unified - no splits)
+# MATCHES & DELIVERIES (split by match_type/gender/team_type)
 # ============================================================
-cli_h2("Exporting core tables")
+cli_h2("Exporting matches and deliveries (split)")
 
-# Matches (all matches in one file)
-export_info$matches <- export_table(
-  con, "matches",
-  file.path(OUTPUT_DIR, "matches.parquet")
-)
+# Get all unique combinations
+combos <- DBI::dbGetQuery(con, "
+  SELECT DISTINCT match_type, gender, team_type
+  FROM matches
+  WHERE match_type IS NOT NULL
+    AND gender IS NOT NULL
+    AND team_type IS NOT NULL
+  ORDER BY match_type, gender, team_type
+")
 
-# Deliveries (all ball-by-ball data in one file)
-# Join with matches to include team_type for filtering
-cli_alert_info("Exporting deliveries.parquet...")
-deliveries_query <- "
-  SELECT d.*, m.team_type
-  FROM deliveries d
-  LEFT JOIN matches m ON d.match_id = m.match_id
-"
-deliveries_data <- DBI::dbGetQuery(con, deliveries_query)
+cli_alert_info("Found {nrow(combos)} unique combinations")
 
-if (nrow(deliveries_data) > 0) {
-  deliveries_path <- file.path(OUTPUT_DIR, "deliveries.parquet")
-  write_parquet(deliveries_data, deliveries_path, compression = "zstd")
-  size_mb <- file.size(deliveries_path) / 1024 / 1024
-  cli_alert_success("  deliveries.parquet: {format(nrow(deliveries_data), big.mark=',')} rows, {round(size_mb, 1)} MB")
-  export_info$deliveries <- list(
-    name = "deliveries.parquet",
-    rows = nrow(deliveries_data),
-    size_bytes = file.size(deliveries_path)
-  )
-} else {
-  cli_alert_warning("  No deliveries data to export")
-  export_info$deliveries <- NULL
+for (i in seq_len(nrow(combos))) {
+  mt <- combos$match_type[i]
+  gen <- combos$gender[i]
+  tt <- combos$team_type[i]
+
+  # Create filename: matches_T20_male_international.parquet
+  suffix <- paste(mt, gen, tt, sep = "_")
+
+  # Export matches for this combination
+
+  matches_query <- sprintf("
+    SELECT * FROM matches
+    WHERE match_type = '%s' AND gender = '%s' AND team_type = '%s'
+  ", mt, gen, tt)
+
+  matches_data <- DBI::dbGetQuery(con, matches_query)
+
+  if (nrow(matches_data) > 0) {
+    matches_path <- file.path(OUTPUT_DIR, paste0("matches_", suffix, ".parquet"))
+    write_parquet(matches_data, matches_path, compression = "zstd")
+    size_mb <- file.size(matches_path) / 1024 / 1024
+    cli_alert_success("  matches_{suffix}: {format(nrow(matches_data), big.mark=',')} rows, {round(size_mb, 2)} MB")
+
+    export_info[[paste0("matches_", suffix)]] <- list(
+      name = paste0("matches_", suffix, ".parquet"),
+      rows = nrow(matches_data),
+      size_bytes = file.size(matches_path)
+    )
+  }
+
+  # Export deliveries for this combination (join to get team_type from matches)
+  # Note: deliveries already has gender, so only add team_type
+  deliveries_query <- sprintf("
+    SELECT d.*, m.team_type
+    FROM deliveries d
+    INNER JOIN matches m ON d.match_id = m.match_id
+    WHERE m.match_type = '%s' AND m.gender = '%s' AND m.team_type = '%s'
+  ", mt, gen, tt)
+
+  deliveries_data <- DBI::dbGetQuery(con, deliveries_query)
+
+  if (nrow(deliveries_data) > 0) {
+    deliveries_path <- file.path(OUTPUT_DIR, paste0("deliveries_", suffix, ".parquet"))
+    write_parquet(deliveries_data, deliveries_path, compression = "zstd")
+    size_mb <- file.size(deliveries_path) / 1024 / 1024
+    cli_alert_success("  deliveries_{suffix}: {format(nrow(deliveries_data), big.mark=',')} rows, {round(size_mb, 1)} MB")
+
+    export_info[[paste0("deliveries_", suffix)]] <- list(
+      name = paste0("deliveries_", suffix, ".parquet"),
+      rows = nrow(deliveries_data),
+      size_bytes = file.size(deliveries_path)
+    )
+  }
 }
+
+# ============================================================
+# UNIFIED TABLES (players, team_elo)
+# ============================================================
+cli_h2("Exporting unified tables")
 
 # Players (global registry)
 export_info$players <- export_table(
@@ -133,45 +175,39 @@ if ("team_elo" %in% tables) {
 }
 
 # ============================================================
-# SKILL INDEX TABLES (separate directories for separate releases)
+# SKILL INDEX TABLES
 # ============================================================
 cli_h2("Exporting skill index tables")
 
-# Create subdirectories for each rating type
-rating_dirs <- c("player_rating", "team_rating", "venue_rating")
-for (rating_dir in rating_dirs) {
-  dir.create(file.path(OUTPUT_DIR, rating_dir), showWarnings = FALSE, recursive = TRUE)
-}
-
-# Player skill tables -> player_rating
+# Player skill tables
 player_skill_tables <- c("test_player_skill", "odi_player_skill", "t20_player_skill")
 for (tbl in player_skill_tables) {
   if (tbl %in% tables) {
     export_info[[tbl]] <- export_table(
       con, tbl,
-      file.path(OUTPUT_DIR, "player_rating", paste0(tbl, ".parquet"))
+      file.path(OUTPUT_DIR, paste0(tbl, ".parquet"))
     )
   }
 }
 
-# Team skill tables -> team_rating
+# Team skill tables
 team_skill_tables <- c("test_team_skill", "odi_team_skill", "t20_team_skill")
 for (tbl in team_skill_tables) {
   if (tbl %in% tables) {
     export_info[[tbl]] <- export_table(
       con, tbl,
-      file.path(OUTPUT_DIR, "team_rating", paste0(tbl, ".parquet"))
+      file.path(OUTPUT_DIR, paste0(tbl, ".parquet"))
     )
   }
 }
 
-# Venue skill tables -> venue_rating
+# Venue skill tables
 venue_skill_tables <- c("test_venue_skill", "odi_venue_skill", "t20_venue_skill")
 for (tbl in venue_skill_tables) {
   if (tbl %in% tables) {
     export_info[[tbl]] <- export_table(
       con, tbl,
-      file.path(OUTPUT_DIR, "venue_rating", paste0(tbl, ".parquet"))
+      file.path(OUTPUT_DIR, paste0(tbl, ".parquet"))
     )
   }
 }
@@ -193,13 +229,27 @@ cli_alert_info("Total rows: {format(manifest$total_rows, big.mark=',')}")
 cli_alert_info("Total size: {round(manifest$total_size_bytes / 1024 / 1024, 1)} MB")
 
 # List files by category
-cli_h3("Core Tables")
-for (f in grep("^(matches|deliveries|players|team_elo)\\.parquet$", parquet_files, value = TRUE)) {
+cli_h3("Matches (split by match_type/gender/team_type)")
+matches_files <- grep("^matches_", parquet_files, value = TRUE)
+for (f in matches_files) {
   size <- file.size(file.path(OUTPUT_DIR, f))
   cli_alert_info("  {f}: {round(size / 1024 / 1024, 2)} MB")
 }
 
-cli_h3("Skill Indices (9 tables)")
+cli_h3("Deliveries (split by match_type/gender/team_type)")
+deliveries_files <- grep("^deliveries_", parquet_files, value = TRUE)
+for (f in deliveries_files) {
+  size <- file.size(file.path(OUTPUT_DIR, f))
+  cli_alert_info("  {f}: {round(size / 1024 / 1024, 2)} MB")
+}
+
+cli_h3("Unified Tables")
+for (f in grep("^(players|team_elo)\\.parquet$", parquet_files, value = TRUE)) {
+  size <- file.size(file.path(OUTPUT_DIR, f))
+  cli_alert_info("  {f}: {round(size / 1024 / 1024, 2)} MB")
+}
+
+cli_h3("Skill Indices")
 for (f in grep("_skill\\.parquet$", parquet_files, value = TRUE)) {
   size <- file.size(file.path(OUTPUT_DIR, f))
   cli_alert_info("  {f}: {round(size / 1024 / 1024, 2)} MB")
