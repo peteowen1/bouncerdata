@@ -156,6 +156,13 @@ jobs:
             json_files <- list.files(json_dir, pattern = "\\.json$", full.names = TRUE, recursive = TRUE)
             cli::cli_alert_info("Found {length(json_files)} JSON files")
 
+            # WORKAROUND: RcppSimdJson returns different structure than jsonlite
+            # Override bouncer's internal function to force jsonlite
+            cli::cli_alert_info("Forcing jsonlite parser (RcppSimdJson has array simplification issues)")
+            assignInNamespace("read_json_fast", function(file_path) {
+              jsonlite::fromJSON(file_path, simplifyVector = FALSE)
+            }, ns = "bouncer")
+
             # Parse all files
             all_matches <- list()
             all_players <- list()
