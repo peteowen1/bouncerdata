@@ -1,0 +1,453 @@
+# Daily Cricsheet Data Sync
+#
+# Incremental sync that downloads only recently_added_7_json.zip (~1-5MB)
+# and merges new matches into existing parquet files.
+#
+# Runtime: ~5-15 min (incremental) | ~60 min (full rebuild)
+
+name: Cricsheet Daily Sync
+
+on:
+  schedule:
+    - cron: '0 7 * * *'  # Daily at 7 AM UTC
+  workflow_dispatch:
+    inputs:
+      force_full_rebuild:
+        description: 'Force full rebuild from all_json.zip'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  R_VERSION: '4.3.2'
+  GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync-cricsheet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ env.R_VERSION }}
+          use-public-rspm: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: ${{ runner.os }}-r-${{ env.R_VERSION }}-${{ hashFiles('bouncer/DESCRIPTION') }}
+          restore-keys: |
+            ${{ runner.os }}-r-${{ env.R_VERSION }}-
+
+      - name: Install R dependencies
+        run: |
+          install.packages(c("remotes", "httr2", "jsonlite", "arrow", "piggyback", "cli", "dplyr"))
+          remotes::install_github("peteowen1/bouncer@dev", dependencies = TRUE)
+        shell: Rscript {0}
+
+      - name: Check for new matches and sync
+        id: sync
+        run: |
+          library(bouncer)
+
+          cli::cli_h1("Cricsheet Daily Sync")
+
+          force_rebuild <- "${{ inputs.force_full_rebuild }}" == "true"
+
+          # Download current manifest
+          cli::cli_h2("Checking current state")
+          manifest <- tryCatch(
+            get_remote_manifest(force = TRUE),
+            error = function(e) {
+              cli::cli_alert_warning("Could not download manifest: {e$message}")
+              list(match_ids = character(0), created_at = NULL)
+            }
+          )
+          current_count <- length(manifest$match_ids)
+          cli::cli_alert_info("Current release has {current_count} matches")
+
+          # Download recently_added_7_json.zip
+          cli::cli_h2("Downloading recent matches from Cricsheet")
+          temp_dir <- tempfile("cricsheet_sync_")
+          dir.create(temp_dir, recursive = TRUE)
+          json_dir <- file.path(temp_dir, "json")
+          dir.create(json_dir)
+
+          recent_zip <- file.path(temp_dir, "recently_added_7_json.zip")
+          httr2::request("https://cricsheet.org/downloads/recently_added_7_json.zip") |>
+            httr2::req_timeout(300) |>
+            httr2::req_perform(path = recent_zip)
+
+          unzip(recent_zip, exdir = json_dir)
+          file.remove(recent_zip)
+
+          json_files <- list.files(json_dir, pattern = "\\.json$", full.names = TRUE, recursive = TRUE)
+          recent_ids <- tools::file_path_sans_ext(basename(json_files))
+          cli::cli_alert_info("Cricsheet recently_added has {length(recent_ids)} matches")
+
+          # Identify new matches
+          new_ids <- setdiff(recent_ids, manifest$match_ids)
+          cli::cli_alert_info("New matches to add: {length(new_ids)}")
+
+          # Output for summary
+          output_file <- Sys.getenv("GITHUB_OUTPUT")
+          cat(sprintf("current_count=%d\n", current_count), file = output_file, append = TRUE)
+          cat(sprintf("recent_count=%d\n", length(recent_ids)), file = output_file, append = TRUE)
+          cat(sprintf("new_count=%d\n", length(new_ids)), file = output_file, append = TRUE)
+
+          # Decide: incremental or full rebuild
+          if (force_rebuild) {
+            cli::cli_alert_warning("Force full rebuild requested")
+            cat("rebuild_type=full\n", file = output_file, append = TRUE)
+          } else if (length(new_ids) == 0) {
+            cli::cli_alert_success("No new matches - release is up to date")
+            cat("rebuild_type=none\n", file = output_file, append = TRUE)
+            unlink(temp_dir, recursive = TRUE)
+            quit(save = "no", status = 0)
+          } else if (current_count == 0) {
+            cli::cli_alert_warning("No existing data - full rebuild required")
+            cat("rebuild_type=full\n", file = output_file, append = TRUE)
+          } else {
+            cli::cli_alert_info("Incremental sync: {length(new_ids)} new matches")
+            cat("rebuild_type=incremental\n", file = output_file, append = TRUE)
+          }
+
+          rebuild_type <- if (force_rebuild || current_count == 0) "full" else "incremental"
+
+          # Setup parquet directory
+          parquet_dir <- file.path(temp_dir, "parquet")
+          dir.create(parquet_dir, recursive = TRUE)
+
+          MATCH_TYPES <- c("Test", "ODI", "T20", "IT20", "MDM", "ODM")
+          GENDERS <- c("male", "female")
+
+          if (rebuild_type == "full") {
+            # ============ FULL REBUILD ============
+            cli::cli_h2("Full Rebuild: Downloading all_json.zip")
+
+            # Clear json_dir and download full archive
+            unlink(json_dir, recursive = TRUE)
+            dir.create(json_dir)
+
+            full_zip <- file.path(temp_dir, "all_json.zip")
+            httr2::request("https://cricsheet.org/downloads/all_json.zip") |>
+              httr2::req_timeout(1800) |>
+              httr2::req_perform(path = full_zip)
+
+            unzip(full_zip, exdir = json_dir)
+            file.remove(full_zip)
+            gc()
+
+            json_files <- list.files(json_dir, pattern = "\\.json$", full.names = TRUE, recursive = TRUE)
+            cli::cli_alert_info("Found {length(json_files)} JSON files")
+
+            # Parse all files
+            all_matches <- list()
+            all_players <- list()
+            all_innings <- list()
+            all_powerplays <- list()
+            deliveries_by_partition <- list()
+
+            pb <- cli::cli_progress_bar("Parsing", total = length(json_files))
+            parse_errors <- 0
+
+            for (i in seq_along(json_files)) {
+              tryCatch({
+                parsed <- parse_cricsheet_json(json_files[i])
+                mt <- parsed$match_info$match_type
+                gender <- parsed$match_info$gender
+
+                if (!mt %in% MATCH_TYPES) mt <- "Other"
+                if (!gender %in% GENDERS) gender <- "unknown"
+                pk <- paste(mt, gender, sep = "_")
+
+                all_matches[[length(all_matches) + 1]] <- parsed$match_info
+                all_players[[length(all_players) + 1]] <- parsed$players
+
+                if (nrow(parsed$innings) > 0) {
+                  all_innings[[length(all_innings) + 1]] <- parsed$innings
+                }
+                if (nrow(parsed$powerplays) > 0) {
+                  all_powerplays[[length(all_powerplays) + 1]] <- parsed$powerplays
+                }
+                if (nrow(parsed$deliveries) > 0) {
+                  if (is.null(deliveries_by_partition[[pk]])) {
+                    deliveries_by_partition[[pk]] <- list()
+                  }
+                  deliveries_by_partition[[pk]][[length(deliveries_by_partition[[pk]]) + 1]] <- parsed$deliveries
+                }
+              }, error = function(e) {
+                parse_errors <<- parse_errors + 1
+              })
+
+              if (i %% 1000 == 0) gc()
+              cli::cli_progress_update(id = pb)
+            }
+            cli::cli_progress_done(id = pb)
+
+            if (parse_errors > 0) {
+              cli::cli_alert_warning("Failed to parse {parse_errors} files")
+            }
+
+            # Write parquet files
+            cli::cli_h2("Writing parquet files")
+
+            write_and_log <- function(data, filename) {
+              arrow::write_parquet(data, file.path(parquet_dir, filename), compression = "zstd")
+              cli::cli_alert_success("{filename}: {nrow(data)} rows")
+            }
+
+            matches <- do.call(rbind, all_matches)
+            write_and_log(matches, "matches.parquet")
+            rm(matches, all_matches); gc()
+
+            players <- do.call(rbind, all_players)
+            players <- players[!duplicated(players$player_id), ]
+            write_and_log(players, "players.parquet")
+            rm(players, all_players); gc()
+
+            if (length(all_innings) > 0) {
+              innings <- do.call(rbind, all_innings)
+              write_and_log(innings, "match_innings.parquet")
+              rm(innings, all_innings); gc()
+            }
+
+            if (length(all_powerplays) > 0) {
+              powerplays <- do.call(rbind, all_powerplays)
+              write_and_log(powerplays, "innings_powerplays.parquet")
+              rm(powerplays, all_powerplays); gc()
+            }
+
+            for (pk in names(deliveries_by_partition)) {
+              del <- do.call(rbind, deliveries_by_partition[[pk]])
+              write_and_log(del, paste0("deliveries_", pk, ".parquet"))
+              rm(del); gc()
+            }
+            rm(deliveries_by_partition); gc()
+
+          } else {
+            # ============ INCREMENTAL SYNC ============
+            cli::cli_h2("Incremental Sync")
+
+            # Parse only new matches
+            new_json_files <- json_files[tools::file_path_sans_ext(basename(json_files)) %in% new_ids]
+            cli::cli_alert_info("Parsing {length(new_json_files)} new JSON files")
+
+            new_matches <- list()
+            new_players <- list()
+            new_innings <- list()
+            new_powerplays <- list()
+            new_deliveries_by_partition <- list()
+
+            # WORKAROUND: RcppSimdJson returns different structure than jsonlite
+            # Override bouncer's internal function to force jsonlite
+            cli::cli_alert_info("Forcing jsonlite parser (RcppSimdJson has array simplification issues)")
+            assignInNamespace("read_json_fast", function(file_path) {
+              jsonlite::fromJSON(file_path, simplifyVector = FALSE)
+            }, ns = "bouncer")
+
+            for (jf in new_json_files) {
+              tryCatch({
+                parsed <- parse_cricsheet_json(jf)
+                mt <- parsed$match_info$match_type
+                gender <- parsed$match_info$gender
+
+                if (!mt %in% MATCH_TYPES) mt <- "Other"
+                if (!gender %in% GENDERS) gender <- "unknown"
+                pk <- paste(mt, gender, sep = "_")
+
+                new_matches[[length(new_matches) + 1]] <- parsed$match_info
+                new_players[[length(new_players) + 1]] <- parsed$players
+
+                if (nrow(parsed$innings) > 0) {
+                  new_innings[[length(new_innings) + 1]] <- parsed$innings
+                }
+                if (nrow(parsed$powerplays) > 0) {
+                  new_powerplays[[length(new_powerplays) + 1]] <- parsed$powerplays
+                }
+                if (nrow(parsed$deliveries) > 0) {
+                  if (is.null(new_deliveries_by_partition[[pk]])) {
+                    new_deliveries_by_partition[[pk]] <- list()
+                  }
+                  new_deliveries_by_partition[[pk]][[length(new_deliveries_by_partition[[pk]]) + 1]] <- parsed$deliveries
+                }
+              }, error = function(e) {
+                cli::cli_alert_warning("Failed to parse {basename(jf)}: {e$message}")
+              })
+            }
+
+            # Identify affected partitions
+            affected_partitions <- names(new_deliveries_by_partition)
+            cli::cli_alert_info("Affected partitions: {paste(affected_partitions, collapse = ', ')}")
+
+            # Download existing files from release
+            cli::cli_h2("Downloading existing parquet files")
+
+            download_parquet <- function(filename) {
+              dest <- file.path(parquet_dir, filename)
+              tryCatch({
+                piggyback::pb_download(
+                  file = filename,
+                  repo = "peteowen1/bouncerdata",
+                  tag = "cricsheet",
+                  dest = parquet_dir
+                )
+                if (file.exists(dest)) {
+                  cli::cli_alert_success("Downloaded {filename}")
+                  return(TRUE)
+                }
+              }, error = function(e) {
+                cli::cli_alert_warning("Could not download {filename}: {e$message}")
+              })
+              return(FALSE)
+            }
+
+            # Download core files
+            download_parquet("matches.parquet")
+            download_parquet("players.parquet")
+            download_parquet("match_innings.parquet")
+            download_parquet("innings_powerplays.parquet")
+
+            # Download affected delivery partitions
+            for (pk in affected_partitions) {
+              download_parquet(paste0("deliveries_", pk, ".parquet"))
+            }
+
+            # Merge and write
+            cli::cli_h2("Merging new data")
+
+            merge_and_write <- function(new_data, filename, key_col = NULL) {
+              existing_file <- file.path(parquet_dir, filename)
+              # Use dplyr::bind_rows to handle schema differences (new columns in newer data)
+              new_df <- if (length(new_data) > 0) dplyr::bind_rows(new_data) else NULL
+
+              if (is.null(new_df) || nrow(new_df) == 0) {
+                return(FALSE)
+              }
+
+              if (file.exists(existing_file)) {
+                existing_df <- arrow::read_parquet(existing_file)
+                # bind_rows handles mismatched columns gracefully (fills with NA)
+                combined <- dplyr::bind_rows(existing_df, new_df)
+
+                # Deduplicate if key column provided
+                if (!is.null(key_col) && key_col %in% names(combined)) {
+                  combined <- combined[!duplicated(combined[[key_col]]), ]
+                }
+              } else {
+                combined <- new_df
+              }
+
+              arrow::write_parquet(combined, existing_file, compression = "zstd")
+              cli::cli_alert_success("{filename}: now {nrow(combined)} rows (+{nrow(new_df)} new)")
+              return(TRUE)
+            }
+
+            merge_and_write(new_matches, "matches.parquet", "match_id")
+            merge_and_write(new_players, "players.parquet", "player_id")
+            merge_and_write(new_innings, "match_innings.parquet")
+            merge_and_write(new_powerplays, "innings_powerplays.parquet")
+
+            # Merge delivery partitions
+            for (pk in affected_partitions) {
+              merge_and_write(
+                new_deliveries_by_partition[[pk]],
+                paste0("deliveries_", pk, ".parquet")
+              )
+            }
+          }
+
+          # Generate updated manifest
+          cli::cli_h2("Generating manifest")
+          manifest <- bouncer:::generate_manifest(parquet_dir = parquet_dir)
+          jsonlite::write_json(manifest, file.path(parquet_dir, "manifest.json"), auto_unbox = TRUE, pretty = TRUE)
+          cli::cli_alert_success("Manifest: {length(manifest$match_ids)} total matches")
+
+          # Upload to GitHub release
+          cli::cli_h2("Uploading to GitHub release")
+          tryCatch(
+            piggyback::pb_release_create(repo = "peteowen1/bouncerdata", tag = "cricsheet", name = "Cricsheet Raw Data"),
+            error = function(e) cli::cli_alert_info("Release already exists")
+          )
+
+          for (f in list.files(parquet_dir, full.names = TRUE)) {
+            tryCatch({
+              piggyback::pb_upload(f, repo = "peteowen1/bouncerdata", tag = "cricsheet", overwrite = TRUE)
+              cli::cli_alert_success("Uploaded {basename(f)}")
+            }, error = function(e) {
+              cli::cli_alert_warning("Failed to upload {basename(f)}: {e$message}")
+            })
+          }
+
+          # Cleanup
+          unlink(temp_dir, recursive = TRUE)
+
+          cat(sprintf("final_count=%d\n", length(manifest$match_ids)), file = output_file, append = TRUE)
+
+          cli::cli_h1("Sync Complete!")
+        shell: Rscript {0}
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## Cricsheet Daily Sync Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Previous matches in release**: ${{ steps.sync.outputs.current_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Recent matches from Cricsheet**: ${{ steps.sync.outputs.recent_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **New matches added**: ${{ steps.sync.outputs.new_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Rebuild type**: ${{ steps.sync.outputs.rebuild_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Final match count**: ${{ steps.sync.outputs.final_count }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Cricsheet Daily Sync Failed - ${new Date().toISOString().split('T')[0]}`;
+            const body = `## Workflow Failure
+
+            The Cricsheet daily sync workflow failed.
+
+            - **Run ID**: ${{ github.run_id }}
+            - **Run URL**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            - **Triggered by**: ${{ github.event_name }}
+
+            Please check the workflow logs for details.
+            `;
+
+            // Check if issue already exists today
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'workflow-failure,cricsheet'
+            });
+
+            const today = new Date().toISOString().split('T')[0];
+            const existingIssue = issues.data.find(i => i.title.includes(today));
+
+            if (!existingIssue) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['workflow-failure', 'cricsheet']
+              });
+            }

@@ -1,0 +1,416 @@
+# Daily Fox Sports Cricket Data Scraping
+#
+# Scrapes ball-by-ball data from Fox Sports API using headless Chrome.
+# The API requires a userkey that can only be extracted via browser automation.
+#
+# Schedule: Daily at 10 AM UTC (after Australian matches - BBL ~8-10 PM AEDT)
+# Runtime: ~30-60 min depending on new matches
+
+name: Fox Sports Daily Scrape
+
+on:
+  schedule:
+    - cron: '0 10 * * *'  # Daily at 10 AM UTC
+  workflow_dispatch:
+    inputs:
+      formats:
+        description: 'Comma-separated formats to scrape (e.g., BBL,WBBL,TEST)'
+        required: false
+        default: 'BBL,WBBL,TEST,T20I,WT20I,ODI,WODI'
+        type: string
+      years:
+        description: 'Years to scan (e.g., 2024,2025)'
+        required: false
+        default: '2024,2025'
+        type: string
+      scan_for_new:
+        description: 'Scan for new matches (slower) or use cached discoveries only'
+        required: false
+        default: 'true'
+        type: boolean
+      force_refetch:
+        description: 'Re-fetch all matches even if files exist'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  R_VERSION: '4.3.2'
+  GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  scrape-foxsports:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+        id: setup-chrome
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ env.R_VERSION }}
+          use-public-rspm: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: ${{ runner.os }}-r-${{ env.R_VERSION }}-foxsports-${{ hashFiles('bouncer/DESCRIPTION') }}
+          restore-keys: |
+            ${{ runner.os }}-r-${{ env.R_VERSION }}-foxsports-
+            ${{ runner.os }}-r-${{ env.R_VERSION }}-
+
+      - name: Cache Fox Sports discovery files
+        uses: actions/cache@v4
+        with:
+          path: |
+            fox_discovered_*.rds
+          key: foxsports-discovery-${{ github.run_number }}
+          restore-keys: |
+            foxsports-discovery-
+
+      - name: Install R dependencies
+        run: |
+          install.packages(c("remotes", "httr2", "jsonlite", "arrow", "piggyback", "cli", "dplyr", "chromote", "websocket"))
+          remotes::install_github("peteowen1/bouncer@dev", dependencies = TRUE)
+        shell: Rscript {0}
+
+      - name: Scrape Fox Sports data
+        id: scrape
+        run: |
+          library(bouncer)
+
+          cli::cli_h1("Fox Sports Daily Scrape")
+
+          # WORKAROUND: RcppSimdJson returns different structure than jsonlite
+          # Override bouncer's internal function to force jsonlite (for consistency)
+          if ("read_json_fast" %in% ls(getNamespace("bouncer"))) {
+            assignInNamespace("read_json_fast", function(file_path) {
+              jsonlite::fromJSON(file_path, simplifyVector = FALSE)
+            }, ns = "bouncer")
+          }
+
+          # Parse inputs
+          formats_input <- "${{ inputs.formats }}"
+          if (formats_input == "") formats_input <- "BBL,WBBL,TEST,T20I,WT20I,ODI,WODI"
+          formats <- trimws(strsplit(formats_input, ",")[[1]])
+
+          years_input <- "${{ inputs.years }}"
+          if (years_input == "") years_input <- "2024,2025"
+          years <- as.integer(trimws(strsplit(years_input, ",")[[1]]))
+
+          scan_for_new <- "${{ inputs.scan_for_new }}" != "false"
+          force_refetch <- "${{ inputs.force_refetch }}" == "true"
+
+          cli::cli_alert_info("Formats: {paste(formats, collapse = ', ')}")
+          cli::cli_alert_info("Years: {paste(years, collapse = ', ')}")
+          cli::cli_alert_info("Scan for new: {scan_for_new}")
+          cli::cli_alert_info("Force refetch: {force_refetch}")
+
+          # Validate formats
+          valid_formats <- fox_list_formats()
+          invalid <- setdiff(formats, valid_formats)
+          if (length(invalid) > 0) {
+            cli::cli_alert_danger("Invalid formats: {paste(invalid, collapse = ', ')}")
+            cli::cli_alert_info("Valid formats: {paste(valid_formats, collapse = ', ')}")
+            stop("Invalid format specified")
+          }
+
+          # Setup directories
+          output_dir <- "fox_cricket"
+          if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+          # Setup Chrome
+          cli::cli_h2("Setting up headless Chrome")
+          chrome_path <- "${{ steps.setup-chrome.outputs.chrome-path }}"
+          cli::cli_alert_info("Chrome path: {chrome_path}")
+
+          # Set chromote to use the installed Chrome
+          Sys.setenv(CHROMOTE_CHROME = chrome_path)
+
+          # Create browser session with retries
+          browser <- NULL
+          for (attempt in 1:3) {
+            tryCatch({
+              cli::cli_alert_info("Creating browser session (attempt {attempt}/3)...")
+              browser <- chromote::ChromoteSession$new()
+              browser$Network$enable()
+              Sys.sleep(3)
+              cli::cli_alert_success("Browser session created")
+              break
+            }, error = function(e) {
+              cli::cli_alert_warning("Attempt {attempt} failed: {e$message}")
+              if (attempt < 3) Sys.sleep(5)
+            })
+          }
+
+          if (is.null(browser)) {
+            stop("Failed to create browser session after 3 attempts")
+          }
+
+          # Get userkey - try multiple known match IDs
+          cli::cli_h2("Extracting userkey")
+
+          sample_ids <- c(
+            "BBL2024-250101",    # Recent BBL
+            "TEST2024-250101",   # Recent Test
+            "T20I2024-240101",   # Recent T20I
+            "BBL2023-240101"     # Fallback older match
+          )
+
+          userkey <- NULL
+          for (sample_id in sample_ids) {
+            cli::cli_alert_info("Trying to get userkey from {sample_id}...")
+            userkey <- tryCatch({
+              bouncer:::fox_get_userkey(browser, sample_id, timeout_sec = 90)
+            }, error = function(e) {
+              cli::cli_alert_warning("Failed: {e$message}")
+              NULL
+            })
+
+            if (!is.null(userkey)) {
+              cli::cli_alert_success("Got userkey!")
+              break
+            }
+            Sys.sleep(3)
+          }
+
+          if (is.null(userkey)) {
+            cli::cli_alert_danger("Could not extract userkey from any sample match")
+            browser$close()
+            stop("Userkey extraction failed")
+          }
+
+          # Track results
+          results <- list()
+          total_matches <- 0
+          total_balls <- 0
+
+          output_file <- Sys.getenv("GITHUB_OUTPUT")
+
+          for (format in formats) {
+            cli::cli_h2("Processing {format}")
+
+            format_dir <- file.path(output_dir, tolower(format))
+            if (!dir.exists(format_dir)) dir.create(format_dir, recursive = TRUE)
+
+            # Discover matches
+            cache_file <- paste0("fox_discovered_", tolower(format), "_matches.rds")
+
+            cli::cli_alert_info("Discovering {format} matches...")
+            match_ids <- tryCatch({
+              bouncer:::fox_discover_matches(
+                browser = browser,
+                userkey = userkey,
+                format = format,
+                years = years,
+                output_dir = output_dir,
+                cache_file = cache_file,
+                scan_for_new = scan_for_new,
+                verbose = TRUE
+              )
+            }, error = function(e) {
+              cli::cli_alert_warning("Discovery failed for {format}: {e$message}")
+              character(0)
+            })
+
+            if (length(match_ids) == 0) {
+              cli::cli_alert_warning("No {format} matches found")
+              next
+            }
+
+            cli::cli_alert_info("Found {length(match_ids)} {format} matches")
+
+            # Fetch matches with conservative delays
+            cli::cli_alert_info("Fetching {format} match data...")
+            fetch_result <- tryCatch({
+              bouncer:::fox_fetch_matches(
+                browser = browser,
+                match_ids = match_ids,
+                userkey = userkey,
+                format = format,
+                output_dir = output_dir,
+                use_parquet = TRUE,
+                include_players = TRUE,
+                include_details = TRUE,
+                skip_existing = !force_refetch,
+                refresh_key_every = 8,
+                delay_between = 10,  # Conservative delay for CI
+                max_consecutive_failures = 5
+              )
+            }, error = function(e) {
+              cli::cli_alert_warning("Fetch failed for {format}: {e$message}")
+              NULL
+            })
+
+            # Combine matches
+            if (!is.null(fetch_result) || length(list.files(format_dir, pattern = "\\.parquet$")) > 0) {
+              cli::cli_alert_info("Combining {format} matches...")
+              combined <- tryCatch({
+                bouncer:::fox_combine_matches(
+                  format = format,
+                  output_dir = output_dir,
+                  use_parquet = TRUE,
+                  include_players = TRUE,
+                  include_details = TRUE
+                )
+              }, error = function(e) {
+                cli::cli_alert_warning("Combine failed for {format}: {e$message}")
+                NULL
+              })
+
+              if (!is.null(combined)) {
+                results[[format]] <- list(
+                  matches = length(match_ids),
+                  balls = nrow(combined)
+                )
+                total_matches <- total_matches + length(match_ids)
+                total_balls <- total_balls + nrow(combined)
+              }
+            }
+
+            # Refresh userkey between formats
+            cli::cli_alert_info("Refreshing userkey...")
+            Sys.sleep(5)
+            new_key <- tryCatch({
+              bouncer:::fox_get_userkey(browser, match_ids[1], timeout_sec = 60)
+            }, error = function(e) NULL)
+            if (!is.null(new_key)) {
+              userkey <- new_key
+              cli::cli_alert_success("Userkey refreshed")
+            }
+
+            Sys.sleep(10)  # Extra delay between formats
+          }
+
+          # Close browser
+          tryCatch(browser$close(), error = function(e) NULL)
+
+          # Generate manifest
+          cli::cli_h2("Generating manifest")
+          manifest <- list(
+            created_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ"),
+            formats = names(results),
+            summary = results
+          )
+          jsonlite::write_json(manifest, file.path(output_dir, "manifest.json"), auto_unbox = TRUE, pretty = TRUE)
+
+          # Upload to GitHub release
+          cli::cli_h2("Uploading to GitHub release")
+
+          tryCatch(
+            piggyback::pb_release_create(
+              repo = "peteowen1/bouncerdata",
+              tag = "foxsports",
+              name = "Fox Sports Cricket Data"
+            ),
+            error = function(e) cli::cli_alert_info("Release already exists")
+          )
+
+          # Upload combined files for each format
+          for (format in names(results)) {
+            format_dir <- file.path(output_dir, tolower(format))
+
+            combined_files <- list.files(format_dir, pattern = "^all_.*\\.parquet$", full.names = TRUE)
+            for (f in combined_files) {
+              tryCatch({
+                piggyback::pb_upload(f, repo = "peteowen1/bouncerdata", tag = "foxsports", overwrite = TRUE)
+                cli::cli_alert_success("Uploaded {basename(f)}")
+              }, error = function(e) {
+                cli::cli_alert_warning("Failed to upload {basename(f)}: {e$message}")
+              })
+            }
+          }
+
+          # Upload manifest
+          tryCatch({
+            piggyback::pb_upload(
+              file.path(output_dir, "manifest.json"),
+              repo = "peteowen1/bouncerdata",
+              tag = "foxsports",
+              overwrite = TRUE
+            )
+            cli::cli_alert_success("Uploaded manifest.json")
+          }, error = function(e) {
+            cli::cli_alert_warning("Failed to upload manifest: {e$message}")
+          })
+
+          # Output summary
+          cat(sprintf("total_matches=%d\n", total_matches), file = output_file, append = TRUE)
+          cat(sprintf("total_balls=%d\n", total_balls), file = output_file, append = TRUE)
+          cat(sprintf("formats_processed=%s\n", paste(names(results), collapse = ",")), file = output_file, append = TRUE)
+
+          cli::cli_h1("Scrape Complete!")
+          cli::cli_alert_success("Total: {total_matches} matches, {total_balls} balls")
+        shell: Rscript {0}
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## Fox Sports Daily Scrape Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total matches processed**: ${{ steps.scrape.outputs.total_matches }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total balls scraped**: ${{ steps.scrape.outputs.total_balls }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Formats**: ${{ steps.scrape.outputs.formats_processed }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Fox Sports Daily Scrape Failed - ${new Date().toISOString().split('T')[0]}`;
+            const body = `## Workflow Failure
+
+            The Fox Sports daily scrape workflow failed.
+
+            - **Run ID**: ${{ github.run_id }}
+            - **Run URL**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            - **Triggered by**: ${{ github.event_name }}
+            - **Formats requested**: ${{ inputs.formats || 'BBL,WBBL,TEST,T20I,WT20I,ODI,WODI' }}
+
+            ### Common Failure Causes
+            - Userkey extraction timeout (Fox Sports page changes)
+            - Bot detection / rate limiting
+            - Chrome/chromote compatibility issue
+
+            Please check the workflow logs for details.
+            `;
+
+            // Check if issue already exists today
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'workflow-failure,foxsports'
+            });
+
+            const today = new Date().toISOString().split('T')[0];
+            const existingIssue = issues.data.find(i => i.title.includes(today));
+
+            if (!existingIssue) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['workflow-failure', 'foxsports']
+              });
+            }
