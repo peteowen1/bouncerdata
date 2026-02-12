@@ -128,3 +128,6 @@ RELEASE_TYPE=core Rscript scripts/upload_to_release.R
 
 - [bouncer package](https://github.com/peteowen1/bouncer) - Cricket analytics R package
 - [Documentation](https://peteowen1.github.io/bouncer/) - Full package documentation
+- [Getting Started](https://peteowen1.github.io/bouncer/articles/getting-started.html) - Installation and first steps
+- [Database Schema](https://peteowen1.github.io/bouncer/articles/database-schema.html) - Complete table reference
+- [Function Reference](https://peteowen1.github.io/bouncer/reference/) - All exported functions
