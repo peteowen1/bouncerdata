@@ -4,7 +4,7 @@
 # The API requires a userkey that can only be extracted via browser automation.
 #
 # Schedule: Daily at 10 AM UTC (after Australian matches - BBL ~8-10 PM AEDT)
-# Runtime: ~30-60 min depending on new matches
+# Runtime: ~5-15 min for incremental (restores existing data from release, only fetches new matches)
 
 name: Fox Sports Daily Scrape
 
@@ -91,6 +91,74 @@ jobs:
           install.packages(c("remotes", "httr2", "jsonlite", "arrow", "piggyback", "cli", "dplyr", "chromote", "websocket"))
           remotes::install_github("peteowen1/bouncer@dev", dependencies = TRUE)
         shell: Rscript {0}
+
+      - name: Restore existing Fox Sports data
+        run: |
+          library(arrow)
+          library(piggyback)
+          library(cli)
+
+          cli::cli_h2("Restoring previously scraped data from GitHub release")
+
+          output_dir <- "fox_cricket"
+          formats <- c("bbl", "wbbl", "test", "t20i", "wt20i", "odi", "wodi")
+          file_types <- list(
+            matches = "",           # individual files have no suffix
+            players = "_players",
+            details = "_details"
+          )
+
+          total_restored <- 0
+
+          for (fmt in formats) {
+            format_dir <- file.path(output_dir, fmt)
+            dir.create(format_dir, recursive = TRUE, showWarnings = FALSE)
+
+            for (type_name in names(file_types)) {
+              suffix <- file_types[[type_name]]
+              filename <- paste0("all_", fmt, "_", type_name, ".parquet")
+
+              tryCatch({
+                piggyback::pb_download(
+                  filename,
+                  repo = "peteowen1/bouncerdata",
+                  tag = "foxsports",
+                  dest = format_dir
+                )
+
+                combined_path <- file.path(format_dir, filename)
+                if (!file.exists(combined_path)) next
+
+                combined <- arrow::read_parquet(combined_path)
+                if (nrow(combined) == 0 || !"match_id" %in% names(combined)) {
+                  file.remove(combined_path)
+                  next
+                }
+
+                # Split into individual match files
+                match_ids <- unique(combined$match_id)
+                for (mid in match_ids) {
+                  individual_file <- file.path(format_dir, paste0(mid, suffix, ".parquet"))
+                  arrow::write_parquet(combined[combined$match_id == mid, ], individual_file)
+                }
+
+                # Remove combined file (will be regenerated after scraping)
+                file.remove(combined_path)
+
+                if (type_name == "matches") {
+                  cli::cli_alert_success("Restored {length(match_ids)} {toupper(fmt)} {type_name}")
+                  total_restored <- total_restored + length(match_ids)
+                }
+              }, error = function(e) {
+                cli::cli_alert_info("No existing {type_name} for {toupper(fmt)}: {e$message}")
+              })
+            }
+          }
+
+          cli::cli_alert_success("Total: restored {total_restored} matches from previous runs")
+        shell: Rscript {0}
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Scrape Fox Sports data
         id: scrape
