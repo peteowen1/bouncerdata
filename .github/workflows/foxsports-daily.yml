@@ -4,7 +4,7 @@
 # The API requires a userkey that can only be extracted via browser automation.
 #
 # Schedule: Daily at 10 AM UTC (after Australian matches - BBL ~8-10 PM AEDT)
-# Runtime: ~30-60 min depending on new matches
+# Runtime: ~5-15 min for incremental (restores existing data from release, only fetches new matches)
 
 name: Fox Sports Daily Scrape
 
@@ -14,14 +14,14 @@ on:
   workflow_dispatch:
     inputs:
       formats:
-        description: 'Comma-separated formats to scrape (e.g., BBL,WBBL,TEST)'
+        description: 'Comma-separated formats to scrape (e.g., BBL,WBBL,TEST). Leave empty for all.'
         required: false
-        default: 'BBL,WBBL,TEST,T20I,WT20I,ODI,WODI'
+        default: 'BBL,WBBL,TEST,T20I,WT20I,ODI,WODI,IPL'
         type: string
       years:
-        description: 'Years to scan (e.g., 2024,2025)'
+        description: 'Years to scan (e.g., 2024,2025). Leave empty for current + previous year.'
         required: false
-        default: '2024,2025'
+        default: ''
         type: string
       scan_for_new:
         description: 'Scan for new matches (slower) or use cached discoveries only'
@@ -92,6 +92,73 @@ jobs:
           remotes::install_github("peteowen1/bouncer@dev", dependencies = TRUE)
         shell: Rscript {0}
 
+      - name: Restore existing Fox Sports data
+        run: |
+          library(arrow)
+          library(piggyback)
+          library(cli)
+
+          cli::cli_h2("Restoring previously scraped data from GitHub release")
+
+          output_dir <- "fox_cricket"
+          formats <- c("bbl", "wbbl", "test", "t20i", "wt20i", "odi", "wodi", "ipl")
+          file_types <- list(
+            matches = "",           # individual files have no suffix
+            players = "_players",
+            details = "_details"
+          )
+
+          total_restored <- 0
+
+          for (fmt in formats) {
+            format_dir <- file.path(output_dir, fmt)
+            dir.create(format_dir, recursive = TRUE, showWarnings = FALSE)
+
+            for (type_name in names(file_types)) {
+              suffix <- file_types[[type_name]]
+              filename <- paste0("all_", fmt, "_", type_name, ".parquet")
+
+              tryCatch({
+                piggyback::pb_download(
+                  filename,
+                  repo = "peteowen1/bouncerdata",
+                  tag = "foxsports",
+                  dest = format_dir
+                )
+
+                combined_path <- file.path(format_dir, filename)
+                if (!file.exists(combined_path)) next
+
+                combined <- arrow::read_parquet(combined_path)
+                if (nrow(combined) == 0 || !"match_id" %in% names(combined)) {
+                  file.remove(combined_path)
+                  next
+                }
+
+                # Split combined file into individual match files
+                match_list <- split(combined, combined$match_id)
+                for (mid in names(match_list)) {
+                  individual_file <- file.path(format_dir, paste0(mid, suffix, ".parquet"))
+                  arrow::write_parquet(match_list[[mid]], individual_file)
+                }
+
+                file.remove(combined_path)
+
+                if (type_name == "matches") {
+                  cli::cli_alert_success("Restored {length(match_list)} {toupper(fmt)} {type_name}")
+                  total_restored <- total_restored + length(match_list)
+                }
+              }, error = function(e) {
+                cli::cli_alert_info("No existing {type_name} for {toupper(fmt)}: {e$message}")
+              })
+            }
+          }
+
+          cli::cli_alert_success("Total: restored {total_restored} matches from previous runs")
+        shell: Rscript {0}
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Scrape Fox Sports data
         id: scrape
         run: |
@@ -109,11 +176,15 @@ jobs:
 
           # Parse inputs
           formats_input <- "${{ inputs.formats }}"
-          if (formats_input == "") formats_input <- "BBL,WBBL,TEST,T20I,WT20I,ODI,WODI"
+          if (formats_input == "") formats_input <- "BBL,WBBL,TEST,T20I,WT20I,ODI,WODI,IPL"
           formats <- trimws(strsplit(formats_input, ",")[[1]])
 
           years_input <- "${{ inputs.years }}"
-          if (years_input == "") years_input <- "2024,2025"
+          if (years_input == "") {
+            current_year <- as.integer(format(Sys.Date(), "%Y"))
+            years_input <- paste(current_year - 1, current_year, sep = ",")
+            cli::cli_alert_info("No years specified, using dynamic: {years_input}")
+          }
           years <- as.integer(trimws(strsplit(years_input, ",")[[1]]))
 
           scan_for_new <- "${{ inputs.scan_for_new }}" != "false"
@@ -384,7 +455,7 @@ jobs:
             - **Run ID**: ${{ github.run_id }}
             - **Run URL**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             - **Triggered by**: ${{ github.event_name }}
-            - **Formats requested**: ${{ inputs.formats || 'BBL,WBBL,TEST,T20I,WT20I,ODI,WODI' }}
+            - **Formats requested**: ${{ inputs.formats || 'BBL,WBBL,TEST,T20I,WT20I,ODI,WODI,IPL' }}
 
             ### Common Failure Causes
             - Userkey extraction timeout (Fox Sports page changes)

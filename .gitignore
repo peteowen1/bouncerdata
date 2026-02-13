@@ -41,5 +41,13 @@ ssh-key*
 # FOX Sports discovery cache
 fox_discovered_*.rds
 
+# Log files and temp artifacts
+*.log
+temp_*/
+*.duckdb.wal.backup
+
 # RStudio project file
 *.Rproj
+
+# Archived files (obsolete VM scripts, etc.)
+archive/
