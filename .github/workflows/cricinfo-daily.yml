@@ -1,0 +1,387 @@
+# Daily ESPN Cricinfo Data Scraping
+#
+# Scrapes ball-by-ball commentary data from ESPN Cricinfo's consumer API.
+# Uses headless Chrome to extract auth tokens (Cloudflare-protected site).
+# Rich data includes pitch line/length, shot type, wagon wheel, win probability.
+#
+# Schedule: Daily at 12 PM UTC (after international matches)
+# Runtime: ~10-30 min depending on number of new matches
+
+name: Cricinfo Daily Scrape
+
+on:
+  schedule:
+    - cron: '0 12 * * *'  # Daily at 12 PM UTC
+  workflow_dispatch:
+    inputs:
+      series_ids:
+        description: 'Comma-separated series IDs to scrape (e.g., 1455609,1502138)'
+        required: true
+        type: string
+      formats:
+        description: 'Format subdirectory for each series (e.g., test,t20i). Must match series_ids order.'
+        required: true
+        type: string
+      max_innings:
+        description: 'Max innings per match (4 for Tests, 2 for limited overs)'
+        required: false
+        default: '4'
+        type: string
+      force_refetch:
+        description: 'Re-fetch all matches even if files exist'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  R_VERSION: '4.3.2'
+  GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  scrape-cricinfo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+        id: setup-chrome
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ env.R_VERSION }}
+          use-public-rspm: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: ${{ runner.os }}-r-${{ env.R_VERSION }}-cricinfo-${{ hashFiles('bouncer/DESCRIPTION') }}
+          restore-keys: |
+            ${{ runner.os }}-r-${{ env.R_VERSION }}-cricinfo-
+            ${{ runner.os }}-r-${{ env.R_VERSION }}-
+
+      - name: Install R dependencies
+        run: |
+          install.packages(c("remotes", "httr2", "jsonlite", "arrow", "piggyback", "cli", "dplyr", "chromote", "websocket"))
+          remotes::install_github("peteowen1/bouncer@dev", dependencies = TRUE)
+        shell: Rscript {0}
+
+      - name: Restore existing Cricinfo data
+        run: |
+          library(arrow)
+          library(piggyback)
+          library(cli)
+
+          cli::cli_h2("Restoring previously scraped data from GitHub release")
+
+          output_dir <- "cricinfo"
+          formats <- c("test", "odi", "t20i")
+
+          total_restored <- 0
+
+          for (fmt in formats) {
+            format_dir <- file.path(output_dir, fmt)
+            dir.create(format_dir, recursive = TRUE, showWarnings = FALSE)
+
+            for (suffix in c("commentary", "scorecard_batting", "scorecard_bowling", "details")) {
+              filename <- paste0("all_", fmt, "_", suffix, ".parquet")
+
+              tryCatch({
+                piggyback::pb_download(
+                  filename,
+                  repo = "peteowen1/bouncerdata",
+                  tag = "cricinfo",
+                  dest = format_dir
+                )
+
+                combined_path <- file.path(format_dir, filename)
+                if (!file.exists(combined_path)) next
+
+                combined <- arrow::read_parquet(combined_path)
+                if (nrow(combined) == 0 || !"match_id" %in% names(combined)) {
+                  file.remove(combined_path)
+                  next
+                }
+
+                # Split into individual match files
+                match_list <- split(combined, combined$match_id)
+                for (mid in names(match_list)) {
+                  individual_file <- file.path(format_dir, paste0(mid, "_", suffix, ".parquet"))
+                  arrow::write_parquet(match_list[[mid]], individual_file)
+                }
+
+                file.remove(combined_path)
+
+                if (suffix == "commentary") {
+                  cli::cli_alert_success("Restored {length(match_list)} {toupper(fmt)} matches")
+                  total_restored <- total_restored + length(match_list)
+                }
+              }, error = function(e) {
+                cli::cli_alert_info("No existing {suffix} for {toupper(fmt)}: {e$message}")
+              })
+            }
+          }
+
+          cli::cli_alert_success("Total: restored {total_restored} matches from previous runs")
+        shell: Rscript {0}
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scrape Cricinfo data
+        id: scrape
+        run: |
+          library(bouncer)
+          library(cli)
+
+          cli::cli_h1("Cricinfo Daily Scrape")
+
+          # Parse inputs
+          series_input <- "${{ inputs.series_ids }}"
+          formats_input <- "${{ inputs.formats }}"
+          max_innings <- as.integer("${{ inputs.max_innings }}")
+          force_refetch <- "${{ inputs.force_refetch }}" == "true"
+
+          if (series_input == "" || formats_input == "") {
+            cli::cli_alert_danger("series_ids and formats are required inputs")
+            stop("Missing required inputs: series_ids and formats")
+          }
+
+          series_ids <- as.integer(trimws(strsplit(series_input, ",")[[1]]))
+          formats <- trimws(strsplit(formats_input, ",")[[1]])
+
+          if (length(series_ids) != length(formats)) {
+            stop("series_ids and formats must have the same number of entries")
+          }
+
+          if (is.na(max_innings)) max_innings <- 4
+
+          cli::cli_alert_info("Series: {paste(series_ids, collapse = ', ')}")
+          cli::cli_alert_info("Formats: {paste(formats, collapse = ', ')}")
+          cli::cli_alert_info("Max innings: {max_innings}")
+
+          # Setup directories
+          output_dir <- "cricinfo"
+          if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+          # Setup Chrome
+          cli::cli_h2("Setting up headless Chrome")
+          chrome_path <- "${{ steps.setup-chrome.outputs.chrome-path }}"
+          Sys.setenv(CHROMOTE_CHROME = chrome_path)
+
+          browser <- NULL
+          for (attempt in 1:3) {
+            tryCatch({
+              cli::cli_alert_info("Creating browser session (attempt {attempt}/3)...")
+              browser <- chromote::ChromoteSession$new()
+              browser$Network$enable()
+              Sys.sleep(3)
+              cli::cli_alert_success("Browser session created")
+              break
+            }, error = function(e) {
+              cli::cli_alert_warning("Attempt {attempt} failed: {e$message}")
+              if (attempt < 3) Sys.sleep(5)
+            })
+          }
+
+          if (is.null(browser)) stop("Failed to create browser session")
+
+          # Get auth token
+          cli::cli_h2("Extracting auth token")
+          auth_token <- bouncer:::cricinfo_get_auth_token(browser, timeout_sec = 90)
+
+          if (is.null(auth_token)) {
+            browser$close()
+            stop("Auth token extraction failed")
+          }
+
+          cli::cli_alert_success("Got auth token")
+
+          # Track results
+          results <- list()
+          total_matches <- 0
+          total_balls <- 0
+
+          output_file <- Sys.getenv("GITHUB_OUTPUT")
+
+          for (i in seq_along(series_ids)) {
+            sid <- series_ids[i]
+            fmt <- formats[i]
+
+            cli::cli_h2("Processing series {sid} ({toupper(fmt)})")
+
+            # Refresh token if needed
+            if (!bouncer:::cricinfo_token_valid(auth_token)) {
+              cli::cli_alert_info("Token expired, refreshing...")
+              auth_token <- bouncer:::cricinfo_get_auth_token(browser, timeout_sec = 60)
+              if (is.null(auth_token)) {
+                cli::cli_alert_danger("Failed to refresh token, stopping")
+                break
+              }
+            }
+
+            # Discover matches in series
+            matches <- tryCatch({
+              bouncer::cricinfo_discover_matches(browser, auth_token, sid)
+            }, error = function(e) {
+              cli::cli_alert_warning("Discovery failed: {e$message}")
+              NULL
+            })
+
+            if (is.null(matches) || nrow(matches) == 0) {
+              cli::cli_alert_warning("No matches found in series {sid}")
+              next
+            }
+
+            cli::cli_alert_info("Found {nrow(matches)} matches")
+
+            # Fetch all matches
+            fetch_result <- tryCatch({
+              bouncer::cricinfo_fetch_matches(
+                browser = browser,
+                auth_token = auth_token,
+                series_id = sid,
+                match_ids = matches$match_id,
+                output_dir = output_dir,
+                format_subdir = fmt,
+                max_innings = max_innings,
+                skip_existing = !force_refetch,
+                delay_between = 10,
+                max_consecutive_failures = 5
+              )
+            }, error = function(e) {
+              cli::cli_alert_warning("Fetch failed: {e$message}")
+              NULL
+            })
+
+            # Combine
+            format_dir <- file.path(output_dir, fmt)
+            if (length(list.files(format_dir, pattern = "_commentary\\.parquet$")) > 0) {
+              combined <- tryCatch({
+                bouncer::cricinfo_combine_matches(fmt, output_dir = output_dir)
+              }, error = function(e) {
+                cli::cli_alert_warning("Combine failed: {e$message}")
+                NULL
+              })
+
+              if (!is.null(combined)) {
+                n_matches <- length(unique(combined$match_id))
+                results[[paste0(fmt, "_", sid)]] <- list(
+                  series_id = sid,
+                  format = fmt,
+                  matches = n_matches,
+                  balls = nrow(combined)
+                )
+                total_matches <- total_matches + n_matches
+                total_balls <- total_balls + nrow(combined)
+              }
+            }
+
+            Sys.sleep(15)  # Delay between series
+          }
+
+          # Close browser
+          tryCatch(browser$close(), error = function(e) NULL)
+
+          # Upload to GitHub release
+          cli::cli_h2("Uploading to GitHub release")
+
+          tryCatch(
+            piggyback::pb_release_create(
+              repo = "peteowen1/bouncerdata",
+              tag = "cricinfo",
+              name = "Cricinfo Cricket Data"
+            ),
+            error = function(e) cli::cli_alert_info("Release already exists")
+          )
+
+          # Upload combined files
+          for (fmt in unique(formats)) {
+            format_dir <- file.path(output_dir, fmt)
+            combined_files <- list.files(format_dir, pattern = "^all_.*\\.parquet$", full.names = TRUE)
+            for (f in combined_files) {
+              tryCatch({
+                piggyback::pb_upload(f, repo = "peteowen1/bouncerdata", tag = "cricinfo", overwrite = TRUE)
+                cli::cli_alert_success("Uploaded {basename(f)}")
+              }, error = function(e) {
+                cli::cli_alert_warning("Failed to upload {basename(f)}: {e$message}")
+              })
+            }
+          }
+
+          # Output summary
+          cat(sprintf("total_matches=%d\n", total_matches), file = output_file, append = TRUE)
+          cat(sprintf("total_balls=%d\n", total_balls), file = output_file, append = TRUE)
+
+          cli::cli_h1("Scrape Complete!")
+          cli::cli_alert_success("Total: {total_matches} matches, {total_balls} balls")
+        shell: Rscript {0}
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## Cricinfo Daily Scrape Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total matches**: ${{ steps.scrape.outputs.total_matches }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total balls**: ${{ steps.scrape.outputs.total_balls }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Cricinfo Daily Scrape Failed - ${new Date().toISOString().split('T')[0]}`;
+            const body = `## Workflow Failure
+
+            The Cricinfo daily scrape workflow failed.
+
+            - **Run ID**: ${{ github.run_id }}
+            - **Run URL**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            - **Triggered by**: ${{ github.event_name }}
+            - **Series IDs**: ${{ inputs.series_ids || 'scheduled' }}
+            - **Formats**: ${{ inputs.formats || 'scheduled' }}
+
+            ### Common Failure Causes
+            - Auth token extraction timeout (Cloudflare changes)
+            - API rate limiting
+            - Chrome/chromote compatibility issue
+            - Token expiry during long scrape
+
+            Please check the workflow logs for details.
+            `;
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'workflow-failure,cricinfo'
+            });
+
+            const today = new Date().toISOString().split('T')[0];
+            const existingIssue = issues.data.find(i => i.title.includes(today));
+
+            if (!existingIssue) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['workflow-failure', 'cricinfo']
+              });
+            }
