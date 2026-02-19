@@ -16,7 +16,7 @@ on:
       formats:
         description: 'Comma-separated formats to scrape (e.g., BBL,WBBL,TEST). Leave empty for all.'
         required: false
-        default: 'BBL,WBBL,TEST,T20I,WT20I,ODI,WODI,IPL'
+        default: 'BBL,WBBL,TEST,T20I,WT20I,ODI,WODI,IPL,SHEF,T20WC,WT20WC,CT,ODIWC'
         type: string
       years:
         description: 'Years to scan (e.g., 2024,2025). Leave empty for current + previous year.'
@@ -176,7 +176,7 @@ jobs:
 
           # Parse inputs
           formats_input <- "${{ inputs.formats }}"
-          if (formats_input == "") formats_input <- "BBL,WBBL,TEST,T20I,WT20I,ODI,WODI,IPL"
+          if (formats_input == "") formats_input <- "BBL,WBBL,TEST,T20I,WT20I,ODI,WODI,IPL,SHEF,T20WC,WT20WC,CT,ODIWC"
           formats <- trimws(strsplit(formats_input, ",")[[1]])
 
           years_input <- "${{ inputs.years }}"
