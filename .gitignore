@@ -10,6 +10,7 @@ models/*.png
 
 # Scraped data
 fox_cricket/
+cricinfo/
 
 # Raw JSON data (can be re-downloaded from Cricsheet)
 json_files/

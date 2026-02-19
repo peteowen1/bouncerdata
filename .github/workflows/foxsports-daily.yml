@@ -101,7 +101,7 @@ jobs:
           cli::cli_h2("Restoring previously scraped data from GitHub release")
 
           output_dir <- "fox_cricket"
-          formats <- c("bbl", "wbbl", "test", "t20i", "wt20i", "odi", "wodi", "ipl")
+          formats <- c("bbl", "wbbl", "test", "t20i", "wt20i", "odi", "wodi", "ipl", "shef", "t20wc", "wt20wc", "ct", "odiwc")
           file_types <- list(
             matches = "",           # individual files have no suffix
             players = "_players",
@@ -239,11 +239,17 @@ jobs:
           # Get userkey - try multiple known match IDs
           cli::cli_h2("Extracting userkey")
 
+          # Build sample IDs dynamically from current year
+          # Fox Sports match ID format: {FORMAT}{YYYY}-{YYMMDD}
+          cy <- format(Sys.Date(), "%Y")
+          py <- as.character(as.integer(cy) - 1)
+          cy2 <- substring(cy, 3, 4)
+          py2 <- substring(py, 3, 4)
           sample_ids <- c(
-            "BBL2024-250101",    # Recent BBL
-            "TEST2024-250101",   # Recent Test
-            "T20I2024-240101",   # Recent T20I
-            "BBL2023-240101"     # Fallback older match
+            paste0("BBL", cy, "-", cy2, "0101"),    # Current year BBL
+            paste0("TEST", cy, "-", cy2, "0101"),   # Current year Test
+            paste0("T20I", py, "-", py2, "0101"),   # Previous year T20I
+            paste0("BBL", py, "-", py2, "0101")     # Fallback previous year BBL
           )
 
           userkey <- NULL
@@ -455,7 +461,7 @@ jobs:
             - **Run ID**: ${{ github.run_id }}
             - **Run URL**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             - **Triggered by**: ${{ github.event_name }}
-            - **Formats requested**: ${{ inputs.formats || 'BBL,WBBL,TEST,T20I,WT20I,ODI,WODI,IPL' }}
+            - **Formats requested**: ${{ inputs.formats || 'BBL,WBBL,TEST,T20I,WT20I,ODI,WODI,IPL,SHEF,T20WC,WT20WC,CT,ODIWC' }}
 
             ### Common Failure Causes
             - Userkey extraction timeout (Fox Sports page changes)
