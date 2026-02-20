@@ -1261,11 +1261,12 @@ def main():
                 series_gender=gender,
             )
 
-            # Collect all fixtures (including upcoming) for the fixtures table
+            # Save fixtures incrementally (survives crashes/timeouts)
             if series_fixtures:
                 all_fixtures.extend(series_fixtures)
                 upcoming_count = sum(1 for f in series_fixtures if f["status"] not in ("FINISHED", "POST"))
                 print(f"  Fixtures: {len(series_fixtures)} total ({upcoming_count} upcoming)")
+                save_fixtures(series_fixtures, output_dir)
 
             if not finished_matches:
                 print(f"  No completed matches to scrape")
@@ -1380,13 +1381,12 @@ def main():
 
         browser.close()
 
-    # Save fixtures table (all matches: completed + upcoming)
+    # Mark scraped matches in fixtures + print summary
+    if scraped_match_ids:
+        mark_fixtures_scraped(output_dir, scraped_match_ids)
     if all_fixtures:
-        fixtures_path = save_fixtures(all_fixtures, output_dir)
-        if scraped_match_ids:
-            mark_fixtures_scraped(output_dir, scraped_match_ids)
         fixture_upcoming = sum(1 for f in all_fixtures if f["status"] not in ("FINISHED", "POST"))
-        print(f"\nFixtures: saved {len(all_fixtures)} matches ({fixture_upcoming} upcoming) to {fixtures_path}")
+        print(f"\nFixtures: {len(all_fixtures)} total ({fixture_upcoming} upcoming) saved incrementally to {output_dir}/fixtures.parquet")
 
     print(f"\n{'='*60}")
     print(f"DONE: {total_matches} matches, {total_balls} balls, {total_rich} rich")
