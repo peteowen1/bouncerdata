@@ -1,26 +1,28 @@
-"""Auto-discover ESPN Cricinfo series from live scores and schedule pages.
+"""Auto-discover ESPN Cricinfo series from multiple sources.
 
 Scrapes Cricinfo to find series not yet in series_list.csv. Uses the same
 Playwright + stealth approach as the main scraper (Akamai Bot Manager).
 
-Data sources (from /live-cricket-score __NEXT_DATA__):
-1. content.matches — live/recent matches with series metadata (SSR, most reliable)
-2. editionDetails.keySeriesItems — Cricinfo-featured series (IPL, WPL, WTC, etc.)
-3. editionDetails.trendingMatches — trending matches with series refs
-
-Note: /cricket/schedule/* pages load data client-side via hs-consumer-api but
-the responses are not reliably interceptable (service worker caching). The
-live-scores page provides the same current-season coverage via SSR data.
+Data sources (tiers):
+  Tier 1: Parquet scan — read series metadata from existing _match.parquet files (offline, fast)
+  Tier 2: Live scores SSR — /live-cricket-score __NEXT_DATA__ (most reliable web source)
+  Tier 3: Schedule pages — /cricket/schedule/* with API response interception (broadest coverage)
 
 Usage:
   # Dry run — just print discoveries (local with system Chrome):
   python scripts/discover_series.py --system-chrome --dry-run
 
-  # Auto-update CSV:
-  python scripts/discover_series.py --system-chrome --update
+  # Auto-update CSV (all tiers):
+  python scripts/discover_series.py --system-chrome --update --scan-parquets --cricinfo-dir ../cricinfo
+
+  # Parquet scan only (no browser needed):
+  python scripts/discover_series.py --scan-parquets --cricinfo-dir ../cricinfo --skip-web --update
+
+  # Schedule pages only (testing):
+  python scripts/discover_series.py --system-chrome --schedule-only --dry-run
 
   # CI (Playwright's bundled Chromium under Xvfb):
-  xvfb-run --auto-servernum python scripts/discover_series.py --update
+  xvfb-run --auto-servernum python scripts/discover_series.py --update --scan-parquets --cricinfo-dir cricinfo
 """
 
 import sys
@@ -29,8 +31,8 @@ import os
 import time
 import json
 import argparse
-import csv
 from pathlib import Path
+from urllib.parse import unquote
 
 sys.stdout = io.TextIOWrapper(
     sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True
@@ -42,11 +44,17 @@ sys.stderr = io.TextIOWrapper(
 from playwright.sync_api import sync_playwright
 from playwright_stealth import Stealth
 
+from series_cache import (
+    load_csv_cache, scan_parquets_for_series, merge_series, write_csv_cache,
+    CSV_FIELDS, MAX_INNINGS,
+)
+
 # ============================================================
 # Configuration — portable defaults relative to script location
 # ============================================================
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_SERIES_LIST = SCRIPT_DIR / "series_list.csv"
+DEFAULT_CRICINFO_DIR = SCRIPT_DIR.parent / "cricinfo"
 
 stealth = Stealth()
 
@@ -59,9 +67,11 @@ FORMAT_NORMALIZE = {
     "MDM": "test", "ODM": "odi", "IT20": "t20i",
 }
 
-MAX_INNINGS = {"test": 4, "odi": 2, "t20i": 2}
-
 LIVE_SCORES_URL = "https://www.espncricinfo.com/live-cricket-score"
+SCHEDULE_URLS = [
+    "https://www.espncricinfo.com/cricket/schedule/upcoming",
+    "https://www.espncricinfo.com/cricket/schedule/past-results",
+]
 
 
 # ============================================================
@@ -87,17 +97,14 @@ def extract_next_data(page):
 def detect_format(obj):
     """Detect cricket format from a match or series object.
     Returns 't20i', 'odi', 'test', or None."""
-    # Priority 1: internationalClassId
     class_id = obj.get("internationalClassId")
     if class_id and class_id in FORMAT_FROM_CLASS_ID:
         return FORMAT_FROM_CLASS_ID[class_id]
 
-    # Priority 2: format string
     fmt_str = obj.get("format", "")
     if fmt_str and fmt_str.upper() in FORMAT_NORMALIZE:
         return FORMAT_NORMALIZE[fmt_str.upper()]
 
-    # Priority 3: series name heuristics
     name = obj.get("longName", "") or obj.get("name", "") or obj.get("title", "") or ""
     name_upper = name.upper()
     if "T20" in name_upper or "IPL" in name_upper or "BBL" in name_upper or "CPL" in name_upper:
@@ -118,7 +125,6 @@ def detect_gender(obj):
         if g in ("male", "female"):
             return g
 
-    # Heuristic: check name/slug for women/female keywords
     name = obj.get("longName", "") or obj.get("name", "") or obj.get("slug", "") or obj.get("title", "") or ""
     name_lower = name.lower()
     if any(kw in name_lower for kw in ("women", "female", "wbbl", "wpl", "wodi", "wt20")):
@@ -138,9 +144,10 @@ def build_series_entry(series_id, name, slug, fmt, gender, season=None):
         "series_id": str(series_id),
         "name": name or f"Series {series_id}",
         "url": url,
-        "season": season or "",
+        "season": unquote(season) if season else "",
         "format": fmt or "test",
         "max_innings": str(MAX_INNINGS.get(fmt, 4)),
+        "gender": gender or "male",
     }
 
 
@@ -153,7 +160,7 @@ def _add_series(dest, series_id, entry):
 
 
 # ============================================================
-# Data extraction
+# Data extraction from match/series objects
 # ============================================================
 
 def _extract_series_from_matches(matches):
@@ -171,7 +178,6 @@ def _extract_series_from_matches(matches):
         slug = series.get("slug", "")
         name = series.get("longName") or series.get("name") or ""
 
-        # Use match-level metadata for format/gender (more reliable than series-level)
         fmt = detect_format(m) or detect_format(series)
         gender = detect_gender(m) if m.get("gender") else detect_gender(series)
         season = series.get("season") or m.get("season") or ""
@@ -208,7 +214,7 @@ def _extract_trending_series(edition_details):
 
 
 # ============================================================
-# Page-level discovery functions
+# Tier 2: Live scores page (SSR — existing logic)
 # ============================================================
 
 def discover_from_live_scores(page):
@@ -236,21 +242,17 @@ def discover_from_live_scores(page):
         app_data = props.get("appPageProps", {}).get("data", {})
         edition = props.get("editionDetails", {})
 
-        # Source 1: content.matches (live/recent matches)
         content = app_data.get("content", {})
         matches = content.get("matches", []) if isinstance(content, dict) else []
         match_series = _extract_series_from_matches(matches) if matches else []
         print(f"    content.matches: {len(matches)} matches -> {len(match_series)} series")
 
-        # Source 2: keySeriesItems (featured series)
         key_series = _extract_key_series(edition)
         print(f"    keySeriesItems: {len(key_series)} series")
 
-        # Source 3: trendingMatches
         trending_series = _extract_trending_series(edition)
         print(f"    trendingMatches: {len(trending_series)} series")
 
-        # Combine match-based + trending
         all_from_matches = match_series + trending_series
         return all_from_matches, key_series
 
@@ -260,30 +262,137 @@ def discover_from_live_scores(page):
 
 
 # ============================================================
-# CSV operations
+# Tier 3: Schedule pages (API interception)
 # ============================================================
 
-def load_existing_series_ids(csv_path):
-    """Load set of known series IDs from series_list.csv."""
-    ids = set()
-    if not Path(csv_path).exists():
-        return ids
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            sid = row.get("series_id", "").strip().strip('"')
-            if sid:
-                ids.add(sid)
-    return ids
+def discover_from_schedule_pages(page):
+    """Discover series from /cricket/schedule/* pages.
+
+    These pages load match data client-side via hs-consumer-api. We intercept
+    the API responses to extract series metadata. Falls back to __NEXT_DATA__
+    if interception fails.
+    """
+    all_series = []
+    intercepted_matches = []
+
+    def on_response(response):
+        """Capture schedule API responses."""
+        url = response.url
+        if "hs-consumer-api" not in url:
+            return
+        # Schedule API endpoints contain /schedule or /matches
+        if "/schedule" not in url and "/matches" not in url:
+            return
+        try:
+            body = response.json()
+            # The API returns match collections — extract matches from various shapes
+            matches = _extract_matches_from_api(body)
+            intercepted_matches.extend(matches)
+        except Exception:
+            pass
+
+    for schedule_url in SCHEDULE_URLS:
+        try:
+            page_label = "upcoming" if "upcoming" in schedule_url else "past-results"
+            print(f"  Navigating to schedule/{page_label}")
+
+            intercepted_matches.clear()
+            page.on("response", on_response)
+
+            page.goto(schedule_url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(3)  # Wait for client-side API calls
+
+            title = page.title()
+            if "access denied" in title.lower():
+                print(f"    Blocked by Akamai")
+                page.remove_listener("response", on_response)
+                continue
+
+            # Scroll down to trigger lazy-loaded content
+            for _ in range(3):
+                page.keyboard.press("End")
+                time.sleep(1)
+
+            page.remove_listener("response", on_response)
+
+            # Extract series from intercepted API responses
+            if intercepted_matches:
+                api_series = _extract_series_from_matches(intercepted_matches)
+                print(f"    API interception: {len(intercepted_matches)} matches -> {len(api_series)} series")
+                all_series.extend(api_series)
+            else:
+                # Fallback: try __NEXT_DATA__
+                nd = extract_next_data(page)
+                if nd:
+                    props = nd.get("props", {})
+                    app_data = props.get("appPageProps", {}).get("data", {})
+                    content = app_data.get("content", {})
+                    matches = content.get("matches", []) if isinstance(content, dict) else []
+                    if matches:
+                        nd_series = _extract_series_from_matches(matches)
+                        print(f"    __NEXT_DATA__ fallback: {len(matches)} matches -> {len(nd_series)} series")
+                        all_series.extend(nd_series)
+                    else:
+                        # Try collections (schedule pages sometimes use this structure)
+                        collections = content.get("collections", []) if isinstance(content, dict) else []
+                        for coll in collections:
+                            coll_matches = coll.get("matches", [])
+                            if coll_matches:
+                                coll_series = _extract_series_from_matches(coll_matches)
+                                all_series.extend(coll_series)
+                        if collections:
+                            total = sum(len(c.get("matches", [])) for c in collections)
+                            print(f"    __NEXT_DATA__ collections: {total} matches -> {len(all_series)} series")
+                        else:
+                            print(f"    No data found on {page_label} page")
+                else:
+                    print(f"    No __NEXT_DATA__ on {page_label} page")
+
+        except Exception as e:
+            print(f"    Error on {page_label}: {e}")
+            try:
+                page.remove_listener("response", on_response)
+            except Exception:
+                pass
+
+    return all_series
 
 
-def append_to_csv(new_series, csv_path):
-    """Append new series entries to series_list.csv."""
-    fieldnames = ["series_id", "name", "url", "season", "format", "max_innings"]
-    with open(csv_path, "a", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
-        for s in new_series:
-            writer.writerow(s)
+def _extract_matches_from_api(body):
+    """Extract match objects from various API response shapes."""
+    matches = []
+
+    # Shape 1: { matches: [...] }
+    if isinstance(body, dict) and "matches" in body:
+        raw = body["matches"]
+        if isinstance(raw, list):
+            matches.extend(raw)
+
+    # Shape 2: { content: { matches: [...] } }
+    if isinstance(body, dict) and "content" in body:
+        content = body["content"]
+        if isinstance(content, dict) and "matches" in content:
+            raw = content["matches"]
+            if isinstance(raw, list):
+                matches.extend(raw)
+
+    # Shape 3: { collections: [{ matches: [...] }, ...] }
+    if isinstance(body, dict):
+        collections = body.get("collections", [])
+        if isinstance(collections, list):
+            for coll in collections:
+                if isinstance(coll, dict) and "matches" in coll:
+                    raw = coll["matches"]
+                    if isinstance(raw, list):
+                        matches.extend(raw)
+
+    # Shape 4: top-level array
+    if isinstance(body, list):
+        for item in body:
+            if isinstance(item, dict) and "series" in item:
+                matches.append(item)
+
+    return matches
 
 
 # ============================================================
@@ -308,7 +417,7 @@ def main():
     parser.add_argument(
         "--update",
         action="store_true",
-        help="Auto-append new series to series_list.csv",
+        help="Write updated series_list.csv (full rewrite with gender column)",
     )
     parser.add_argument(
         "--dry-run",
@@ -320,73 +429,138 @@ def main():
         type=str,
         help="Season label for new entries (e.g. '2025/26')",
     )
+    # Tier 1: Parquet scan
+    parser.add_argument(
+        "--scan-parquets",
+        action="store_true",
+        help="Enable Tier 1: scan _match.parquet files for series metadata",
+    )
+    parser.add_argument(
+        "--cricinfo-dir",
+        type=str,
+        default=os.environ.get("CRICINFO_OUTPUT_DIR", str(DEFAULT_CRICINFO_DIR)),
+        help="Path to cricinfo/ data directory (for parquet scanning)",
+    )
+    # Tier 3: Schedule pages
+    parser.add_argument(
+        "--skip-schedule",
+        action="store_true",
+        help="Skip Tier 3: schedule page scraping",
+    )
+    parser.add_argument(
+        "--schedule-only",
+        action="store_true",
+        help="Only run Tier 3: schedule page scraping (skip live scores)",
+    )
+    # Skip all web scraping
+    parser.add_argument(
+        "--skip-web",
+        action="store_true",
+        help="Skip all web scraping (Tier 2 + Tier 3), only use parquets + CSV",
+    )
     args = parser.parse_args()
 
     csv_path = Path(args.series_list)
-    existing_ids = load_existing_series_ids(csv_path)
+
+    # Load existing CSV cache
+    csv_cache = load_csv_cache(csv_path)
+    existing_ids = set(csv_cache.keys())
     print(f"Loaded {len(existing_ids)} existing series from {csv_path.name}")
 
-    # Browser launch
-    launch_opts = {
-        "headless": False,
-        "args": ["--disable-blink-features=AutomationControlled"],
-    }
-    if args.system_chrome:
-        launch_opts["channel"] = "chrome"
-
-    all_discovered = {}  # series_id → entry dict (dedup across sources)
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(**launch_opts)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            locale="en-US",
-        )
-        stealth.apply_stealth_sync(context)
-        page = context.new_page()
-
-        # Live scores page: SSR matches + keySeriesItems + trending
+    # ── Tier 1: Parquet scan (no browser needed) ──
+    parquet_series = {}
+    if args.scan_parquets:
         print(f"\n{'='*60}")
-        print("Discovering series from live scores page")
+        print("Tier 1: Scanning parquet files for series metadata")
         print(f"{'='*60}")
-        match_series, key_series = discover_from_live_scores(page)
-        for s in match_series:
-            _add_series(all_discovered, s["series_id"], s)
-        for s in key_series:
-            _add_series(all_discovered, s["series_id"], s)
+        parquet_series = scan_parquets_for_series(args.cricinfo_dir)
+        new_from_parquets = len(set(parquet_series.keys()) - existing_ids)
+        print(f"  Found {len(parquet_series)} series in parquets ({new_from_parquets} new)")
 
-        browser.close()
+    # ── Tier 2 + 3: Web discovery (needs browser) ──
+    web_discovered = {}  # series_id → entry dict
 
-    # Compare with existing
-    new_series = []
-    for sid, entry in sorted(all_discovered.items(), key=lambda x: int(x[0]), reverse=True):
+    if not args.skip_web:
+        needs_browser = not args.skip_web
+        if needs_browser:
+            launch_opts = {
+                "headless": False,
+                "args": ["--disable-blink-features=AutomationControlled"],
+            }
+            if args.system_chrome:
+                launch_opts["channel"] = "chrome"
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch(**launch_opts)
+                context = browser.new_context(
+                    viewport={"width": 1280, "height": 900},
+                    locale="en-US",
+                )
+                stealth.apply_stealth_sync(context)
+                page = context.new_page()
+
+                # Tier 2: Live scores (SSR)
+                if not args.schedule_only:
+                    print(f"\n{'='*60}")
+                    print("Tier 2: Discovering series from live scores page")
+                    print(f"{'='*60}")
+                    match_series, key_series = discover_from_live_scores(page)
+                    for s in match_series:
+                        _add_series(web_discovered, s["series_id"], s)
+                    for s in key_series:
+                        _add_series(web_discovered, s["series_id"], s)
+
+                # Tier 3: Schedule pages
+                if not args.skip_schedule:
+                    print(f"\n{'='*60}")
+                    print("Tier 3: Discovering series from schedule pages")
+                    print(f"{'='*60}")
+                    schedule_series = discover_from_schedule_pages(page)
+                    for s in schedule_series:
+                        _add_series(web_discovered, s["series_id"], s)
+
+                browser.close()
+
+    # ── Merge all sources ──
+    merged = merge_series(csv_cache, parquet_series, web_discovered)
+
+    # Apply season override to newly discovered entries
+    new_series = {}
+    for sid, entry in merged.items():
         if sid not in existing_ids:
             if args.season:
                 entry["season"] = args.season
-            new_series.append(entry)
+            new_series[sid] = entry
 
-    # Report
+    # ── Report ──
     print(f"\n{'='*60}")
     print(f"Discovery Summary")
     print(f"{'='*60}")
-    print(f"  Total discovered: {len(all_discovered)}")
-    print(f"  Already in CSV:   {len(all_discovered) - len(new_series)}")
-    print(f"  NEW series:       {len(new_series)}")
+    print(f"  CSV existing:      {len(existing_ids)}")
+    print(f"  From parquets:     {len(parquet_series)}")
+    print(f"  From web:          {len(web_discovered)}")
+    print(f"  Total merged:      {len(merged)}")
+    print(f"  NEW series:        {len(new_series)}")
 
     if new_series:
         print(f"\nNew series to add:")
-        for s in new_series:
-            print(f"  {s['series_id']:>10}  {s['format']:<5}  {s['name']}")
+        for sid in sorted(new_series.keys(), key=lambda x: int(x), reverse=True):
+            s = new_series[sid]
+            print(f"  {s['series_id']:>10}  {s['format']:<5}  {s.get('gender', 'male'):<7}  {s['name']}")
 
         if args.update and not args.dry_run:
-            append_to_csv(new_series, csv_path)
-            print(f"\nAppended {len(new_series)} new series to {csv_path.name}")
+            write_csv_cache(merged, csv_path)
+            print(f"\nWrote {len(merged)} series to {csv_path.name} (full rewrite with gender column)")
         elif args.dry_run:
             print(f"\n(dry run - no changes written)")
         else:
-            print(f"\nRun with --update to append these to {csv_path.name}")
+            print(f"\nRun with --update to write these to {csv_path.name}")
     else:
         print(f"\nNo new series found.")
+        # Still rewrite CSV if --update to add gender column
+        if args.update and not args.dry_run:
+            write_csv_cache(merged, csv_path)
+            print(f"Rewrote {csv_path.name} with gender column")
 
     print()
     return len(new_series)

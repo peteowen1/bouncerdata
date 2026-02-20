@@ -53,6 +53,8 @@ from playwright.sync_api import sync_playwright
 from playwright_stealth import Stealth
 from pathlib import Path
 
+from series_cache import build_series_list
+
 # ============================================================
 # Configuration — portable defaults relative to script location
 # ============================================================
@@ -62,11 +64,52 @@ DEFAULT_SERIES_LIST = SCRIPT_DIR / "series_list.csv"
 
 stealth = Stealth()
 
+ERROR_LOG_COLUMNS = [
+    "timestamp", "match_id", "series_id", "series_name", "format",
+    "teams", "innings_expected", "innings_scraped", "failed_innings",
+    "error_type", "error_message",
+]
 
-def discover_matches(page, series_id, series_url=None):
-    """Discover all completed matches in a series from the schedule page."""
+
+def log_scrape_error(output_dir, **kwargs):
+    """Append one row to cricinfo/scrape_errors.csv."""
+    log_path = Path(output_dir) / "scrape_errors.csv"
+    write_header = not log_path.exists()
+    with open(log_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=ERROR_LOG_COLUMNS)
+        if write_header:
+            writer.writeheader()
+        row = {col: kwargs.get(col, "") for col in ERROR_LOG_COLUMNS}
+        writer.writerow(row)
+
+
+def _detect_gender_from_series(series_obj, name=""):
+    """Detect gender from series __NEXT_DATA__ object or name."""
+    # Direct field (most reliable)
+    gender = series_obj.get("gender", "")
+    if gender and gender.lower() in ("male", "female"):
+        return gender.lower()
+    # Slug check
+    slug = series_obj.get("slug", "")
+    if "women" in slug.lower():
+        return "female"
+    # Name heuristic
+    if name:
+        lower = name.lower()
+        if any(kw in lower for kw in ("women", "female", "wbbl", "wpl", "wodi", "wt20")):
+            return "female"
+    return None
+
+
+def discover_matches(page, series_id, series_url=None, series_name=None,
+                     series_format=None, series_gender=None):
+    """Discover all matches in a series from the schedule page.
+
+    Returns (finished_matches, all_fixtures):
+        finished_matches: list of dicts for scraping (FINISHED/POST only)
+        all_fixtures: list of dicts for fixtures table (all states including UPCOMING)
+    """
     if not series_url:
-        # Construct URL from series_id as fallback
         series_url = f"https://www.espncricinfo.com/series/{series_id}"
 
     url = series_url + "/match-schedule-fixtures-and-results"
@@ -85,53 +128,85 @@ def discover_matches(page, series_id, series_url=None):
         )
         if not nd_text:
             print(f"    No __NEXT_DATA__ on schedule page")
-            return []
+            return [], []
 
         nd = json.loads(nd_text)
     except Exception as e:
         print(f"    Error loading schedule page: {e}")
-        return []
+        return [], []
 
     try:
-        content = (
-            nd.get("props", {}).get("appPageProps", {}).get("data", {}).get("content", {})
-        )
+        data = nd.get("props", {}).get("appPageProps", {}).get("data", {})
+        content = data.get("content", {})
+        series_obj = data.get("series", {})
         matches_raw = content.get("matches", [])
 
-        matches = []
+        series_slug = series_obj.get("slug", "")
+        # Use series-level metadata, with page data as override
+        s_name = series_name or series_obj.get("longName") or series_obj.get("name") or ""
+        s_format = series_format or ""
+        # Detect gender from page data (more reliable than CSV)
+        page_gender = _detect_gender_from_series(series_obj, s_name)
+        s_gender = page_gender or series_gender or "male"
+
+        finished_matches = []
+        all_fixtures = []
+
         for m in matches_raw:
-            state = m.get("state", "")
-            if state not in ("FINISHED", "POST"):
-                continue
             match_id = m.get("objectId") or m.get("id")
             if not match_id:
                 continue
+            match_id = str(match_id)
+            state = m.get("state", "")
             slug = m.get("slug", "")
-            series_slug = (
-                nd.get("props", {})
-                .get("appPageProps", {})
-                .get("data", {})
-                .get("series", {})
-                .get("slug", "")
-            )
 
-            matches.append(
-                {
-                    "match_id": str(match_id),
+            teams_raw = m.get("teams", [])
+            team1 = teams_raw[0].get("team", {}) if len(teams_raw) > 0 else {}
+            team2 = teams_raw[1].get("team", {}) if len(teams_raw) > 1 else {}
+
+            ground = m.get("ground") or {}
+            country = ground.get("country") or {}
+
+            # Build fixture entry (all states)
+            fixture = {
+                "match_id": match_id,
+                "series_id": str(series_id),
+                "series_name": s_name,
+                "format": s_format,
+                "gender": s_gender,
+                "status": state,
+                "start_date": m.get("startDate", ""),
+                "start_time": m.get("startTime", ""),
+                "title": m.get("title", ""),
+                "team1": team1.get("longName", ""),
+                "team1_abbrev": team1.get("abbreviation", ""),
+                "team2": team2.get("longName", ""),
+                "team2_abbrev": team2.get("abbreviation", ""),
+                "venue": ground.get("name", ""),
+                "country": country.get("name", ""),
+                "status_text": m.get("statusText", ""),
+                "winner_team_id": str(m.get("winnerTeamId", "")) if m.get("winnerTeamId") else "",
+            }
+            all_fixtures.append(fixture)
+
+            # Build scraping entry (finished only)
+            if state in ("FINISHED", "POST"):
+                finished_matches.append({
+                    "match_id": match_id,
                     "slug": slug,
                     "series_slug": series_slug,
                     "series_id": str(series_id),
                     "title": m.get("title", ""),
                     "teams": [
                         t.get("team", {}).get("abbreviation", "?")
-                        for t in m.get("teams", [])
+                        for t in teams_raw
                     ],
-                }
-            )
-        return matches
+                })
+
+        return finished_matches, all_fixtures
     except Exception as e:
         print(f"    Error parsing schedule: {e}")
-        return []
+        return [], []
 
 
 def scrape_match_commentary(browser, context, page, match_url, max_innings=2):
@@ -283,6 +358,7 @@ def _scrape_innings_loop(page, api_responses, max_innings):
         ]
 
     all_balls = []
+    innings_failures = []
 
     for innings_idx, innings_item in enumerate(available_innings):
         if innings_idx > 0:
@@ -292,6 +368,12 @@ def _scrape_innings_loop(page, api_responses, max_innings):
                 time.sleep(2)
             except Exception as e:
                 print(f"      Innings switch to '{innings_item['title']}' failed: {e}")
+                innings_failures.append({
+                    "innings": innings_idx + 1,
+                    "title": innings_item["title"],
+                    "error_type": "innings_switch_timeout",
+                    "error_message": str(e),
+                })
                 continue
 
         # Get initial data for current innings
@@ -317,9 +399,16 @@ def _scrape_innings_loop(page, api_responses, max_innings):
             """
             )
             if ssr_data.get("error") or not ssr_data.get("comments"):
+                err_detail = ssr_data.get('error', 'empty')
                 print(
-                    f"      Innings {innings_idx+1}: No SSR data ({ssr_data.get('error', 'empty')})"
+                    f"      Innings {innings_idx+1}: No SSR data ({err_detail})"
                 )
+                innings_failures.append({
+                    "innings": innings_idx + 1,
+                    "title": innings_item["title"],
+                    "error_type": "no_ssr_data",
+                    "error_message": err_detail,
+                })
                 continue
             ssr_balls = [
                 c for c in ssr_data["comments"] if c.get("overNumber") is not None
@@ -390,6 +479,12 @@ def _scrape_innings_loop(page, api_responses, max_innings):
         if not innings_balls:
             if innings_idx > 0:
                 print(f"      Innings switch: no ball data captured")
+                innings_failures.append({
+                    "innings": innings_idx + 1,
+                    "title": innings_item["title"],
+                    "error_type": "no_ball_data",
+                    "error_message": "Innings switch succeeded but no balls captured",
+                })
             continue
 
         over_range = f"{min(overs)}-{max(overs)}" if overs else "none"
@@ -399,9 +494,12 @@ def _scrape_innings_loop(page, api_responses, max_innings):
 
         all_balls.extend(innings_balls)
 
+    innings_scraped = len(set(b.get("inningNumber") for b in all_balls)) if all_balls else 0
     return {"balls": all_balls, "has_rich": has_rich, "scorecard": None,
             "match_meta": match_meta, "innings_data": innings_data,
-            "detected_format": detected_format, "detected_gender": detected_gender}
+            "detected_format": detected_format, "detected_gender": detected_gender,
+            "innings_expected": len(available_innings), "innings_scraped": innings_scraped,
+            "innings_failures": innings_failures}
 
 
 FORMAT_MAP = {
@@ -450,7 +548,7 @@ def _detect_gender(initial_check):
     if "women" in slug.lower():
         return "female"
     if teams:
-        return "male"  # Default for international matches with team data
+        return None  # Can't determine gender from team data alone
     return None
 
 
@@ -661,7 +759,7 @@ def _find_innings_button(page):
             }
             for (const btn of buttons) {
                 const text = btn.innerText.trim();
-                if (/^[A-Z]{2,6}$/.test(text)) {
+                if (/^[A-Z][A-Z0-9-]{1,7}$/.test(text)) {
                     const rect = btn.getBoundingClientRect();
                     if (rect.height > 15 && rect.width > 30) {
                         return { text, x: rect.x + rect.width/2, y: rect.y + rect.height/2, style: 'limited' };
@@ -762,26 +860,38 @@ def _switch_to_innings(page, target_title):
             else:
                 raise Exception("Tippy dropdown did not appear")
 
-        target_li = tippy.locator(f'li[title="{target_title}"]')
-        if not target_li.count():
-            items = tippy.locator("li[title]").all()
-            for li in items:
-                title = (li.get_attribute("title") or "").strip()
-                if target_title in title or title in target_title:
-                    target_li = li
-                    break
-            else:
-                page.keyboard.press("Escape")
-                raise Exception(f"Could not find '{target_title}' in dropdown")
+        # Click the target innings item via JS (Playwright locator clicks
+        # are unreliable here — the tippy can close during locator resolution)
+        clicked = page.evaluate(
+            """
+            (target) => {
+                const tippy = document.querySelector('.tippy-box');
+                if (!tippy) return 'no_tippy';
+                const items = tippy.querySelectorAll('li[title]');
+                for (const li of items) {
+                    const title = (li.getAttribute('title') || '').trim();
+                    if (title === target || title.includes(target) || target.includes(title)) {
+                        const div = li.querySelector('div');
+                        if (div) div.click();
+                        else li.click();
+                        return 'ok';
+                    }
+                }
+                return 'not_found';
+            }
+        """,
+            target_title,
+        )
 
-        _dismiss_overlays(page)
-        time.sleep(0.3)
-        try:
-            target_li.locator("div").first.click(timeout=5000)
-        except Exception:
-            target_li.locator("div").first.click(force=True)
-
-        return target_title
+        if clicked == "ok":
+            return target_title
+        elif clicked == "no_tippy":
+            if attempt < 2:
+                continue
+            raise Exception("Tippy dropdown closed before click")
+        else:
+            page.keyboard.press("Escape")
+            raise Exception(f"Could not find '{target_title}' in dropdown")
 
     raise Exception(f"Failed to switch to '{target_title}' after 3 attempts")
 
@@ -877,6 +987,115 @@ def save_all_tables(balls, match_meta, innings_data, match_id, format_dir, outpu
     return saved
 
 
+# ============================================================
+# Fixtures table
+# ============================================================
+
+FIXTURE_COLUMNS = [
+    "match_id", "series_id", "series_name", "format", "gender",
+    "status", "start_date", "start_time", "title",
+    "team1", "team1_abbrev", "team2", "team2_abbrev",
+    "venue", "country", "status_text", "winner_team_id",
+    "has_ball_by_ball",
+]
+
+
+def save_fixtures(all_fixtures, output_dir):
+    """Save/update fixtures.parquet with all discovered matches.
+
+    Merges new fixtures with any existing file, deduplicating by match_id
+    (latest status wins for updated matches).
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    outpath = Path(output_dir) / "fixtures.parquet"
+
+    # Normalize fixtures to consistent schema
+    normalized = []
+    for f in all_fixtures:
+        row = {col: f.get(col, "") for col in FIXTURE_COLUMNS}
+        # has_ball_by_ball defaults to False, will be updated later
+        if row["has_ball_by_ball"] == "":
+            row["has_ball_by_ball"] = False
+        normalized.append(row)
+
+    if not normalized:
+        return
+
+    # Load existing fixtures if present
+    existing = {}
+    if outpath.exists():
+        try:
+            old_table = pq.read_table(outpath)
+            for i in range(old_table.num_rows):
+                mid = str(old_table.column("match_id")[i].as_py())
+                row = {}
+                for col in old_table.column_names:
+                    row[col] = old_table.column(col)[i].as_py()
+                existing[mid] = row
+        except Exception:
+            pass  # If existing file is corrupt, start fresh
+
+    # Merge: new fixtures overwrite existing (by match_id)
+    for row in normalized:
+        mid = row["match_id"]
+        if mid in existing:
+            # Preserve has_ball_by_ball from existing if new doesn't set it
+            old = existing[mid]
+            if old.get("has_ball_by_ball") and not row.get("has_ball_by_ball"):
+                row["has_ball_by_ball"] = old["has_ball_by_ball"]
+        existing[mid] = row
+
+    # Write merged fixtures
+    all_rows = list(existing.values())
+    # Ensure all rows have all columns
+    for row in all_rows:
+        for col in FIXTURE_COLUMNS:
+            if col not in row:
+                row[col] = False if col == "has_ball_by_ball" else ""
+
+    table = pa.Table.from_pylist(all_rows)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, outpath)
+    return str(outpath)
+
+
+def mark_fixtures_scraped(output_dir, match_ids):
+    """Update has_ball_by_ball=True for scraped match IDs in fixtures.parquet."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    outpath = Path(output_dir) / "fixtures.parquet"
+    if not outpath.exists() or not match_ids:
+        return
+
+    try:
+        table = pq.read_table(outpath)
+        rows = []
+        scraped_set = set(str(mid) for mid in match_ids)
+        for i in range(table.num_rows):
+            row = {}
+            for col in table.column_names:
+                row[col] = table.column(col)[i].as_py()
+            if str(row.get("match_id")) in scraped_set:
+                row["has_ball_by_ball"] = True
+            rows.append(row)
+        pq.write_table(pa.Table.from_pylist(rows), outpath)
+    except Exception:
+        pass
+
+
+def _infer_gender(name):
+    """Infer gender from series name."""
+    if not name:
+        return "male"
+    lower = name.lower()
+    if any(kw in lower for kw in ("women", "female", "wbbl", "wpl", "wodi", "wt20", "women's")):
+        return "female"
+    return "male"
+
+
 def load_series_list(series_list_path, format_filter=None, max_series=10):
     """Load series from series_list.csv, filtered by format."""
     series = []
@@ -885,6 +1104,9 @@ def load_series_list(series_list_path, format_filter=None, max_series=10):
         for row in reader:
             if format_filter and row.get("format") != format_filter:
                 continue
+            # Infer gender if not in CSV
+            if not row.get("gender"):
+                row["gender"] = _infer_gender(row.get("name", ""))
             series.append(row)
 
     # Most recent first (higher series_id = newer)
@@ -926,6 +1148,11 @@ def main():
         action="store_true",
         help="Re-scrape matches even if output files already exist",
     )
+    parser.add_argument(
+        "--scan-parquets",
+        action="store_true",
+        help="Use build_series_list() to auto-discover series from parquets + CSV",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -933,24 +1160,45 @@ def main():
 
     # Determine which series to scrape
     if args.series:
-        all_series = {}
-        if series_list_path.exists():
-            with open(series_list_path, "r", encoding="utf-8") as f:
-                for row in csv.DictReader(f):
-                    all_series[int(row["series_id"])] = row
+        # Explicit series IDs: look up in merged series list
+        merged = build_series_list(
+            csv_path=str(series_list_path),
+            cricinfo_dir=str(output_dir) if args.scan_parquets else None,
+        )
         target_series = []
         for sid in args.series:
-            if sid in all_series:
-                target_series.append(all_series[sid])
+            sid_str = str(sid)
+            if sid_str in merged:
+                target_series.append(merged[sid_str])
             else:
+                fallback_fmt = args.format or "t20i"
+                if not args.format:
+                    print(f"  WARNING: Series {sid} not in CSV and no --format specified, defaulting to '{fallback_fmt}'")
                 target_series.append(
                     {
-                        "series_id": str(sid),
-                        "format": args.format or "t20i",
+                        "series_id": sid_str,
+                        "format": fallback_fmt,
                         "name": f"Series {sid}",
                         "url": "",
+                        "gender": "male",
                     }
                 )
+    elif args.scan_parquets:
+        # Auto-discover: use build_series_list with parquet scanning
+        merged = build_series_list(
+            csv_path=str(series_list_path),
+            cricinfo_dir=str(output_dir),
+        )
+        all_entries = sorted(merged.values(),
+                             key=lambda s: int(s.get("series_id", 0)), reverse=True)
+        if args.format:
+            all_entries = [s for s in all_entries if s.get("format") == args.format]
+            target_series = all_entries[:args.max_series]
+        else:
+            target_series = []
+            for fmt in ["t20i", "odi", "test"]:
+                fmt_entries = [s for s in all_entries if s.get("format") == fmt]
+                target_series.extend(fmt_entries[:args.max_series])
     elif args.format:
         target_series = load_series_list(
             series_list_path, format_filter=args.format, max_series=args.max_series
@@ -977,6 +1225,9 @@ def main():
     if args.system_chrome:
         launch_opts["channel"] = "chrome"
 
+    all_fixtures = []  # Collect fixtures across all series
+    scraped_match_ids = []  # Track successfully scraped matches
+
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_opts)
         context = browser.new_context(
@@ -994,24 +1245,36 @@ def main():
         for series_info in target_series:
             series_id = series_info["series_id"]
             fmt = series_info.get("format", "t20i")
+            gender = series_info.get("gender", "male")
             max_innings = int(
                 series_info.get("max_innings", 4 if fmt == "test" else 2)
             )
             print(f"\n{'='*60}")
-            print(f"Series: {series_info['name']} (id={series_id}, format={fmt})")
+            print(f"Series: {series_info['name']} (id={series_id}, format={fmt}, gender={gender})")
             print(f"{'='*60}")
 
-            matches = discover_matches(
-                page, series_id, series_url=series_info.get("url") or None
+            finished_matches, series_fixtures = discover_matches(
+                page, series_id,
+                series_url=series_info.get("url") or None,
+                series_name=series_info.get("name"),
+                series_format=fmt,
+                series_gender=gender,
             )
-            if not matches:
-                print(f"  No matches found")
+
+            # Collect all fixtures (including upcoming) for the fixtures table
+            if series_fixtures:
+                all_fixtures.extend(series_fixtures)
+                upcoming_count = sum(1 for f in series_fixtures if f["status"] not in ("FINISHED", "POST"))
+                print(f"  Fixtures: {len(series_fixtures)} total ({upcoming_count} upcoming)")
+
+            if not finished_matches:
+                print(f"  No completed matches to scrape")
                 continue
 
-            print(f"  Found {len(matches)} completed matches")
-            matches = matches[: args.max_matches]
+            print(f"  Found {len(finished_matches)} completed matches")
+            finished_matches = finished_matches[: args.max_matches]
 
-            for match in matches:
+            for match in finished_matches:
                 match_id = match["match_id"]
                 teams = " vs ".join(match["teams"][:2])
                 print(f"\n  Match {match_id}: {teams}")
@@ -1026,6 +1289,7 @@ def main():
                             break
                     if already_scraped:
                         print(f"    Already scraped, skipping")
+                        scraped_match_ids.append(match_id)  # Already has ball-by-ball
                         continue
 
                 match_url = f"https://www.espncricinfo.com/series/{match['series_slug']}/{match['slug']}-{match_id}"
@@ -1039,7 +1303,10 @@ def main():
 
                     # Use detected format/gender, fall back to CSV values
                     save_fmt = result.get("detected_format") or fmt
-                    save_gender = result.get("detected_gender") or "male"
+                    save_gender = result.get("detected_gender")
+                    if not save_gender:
+                        save_gender = "male"
+                        print(f"    WARNING: Could not detect gender, defaulting to 'male'")
                     format_dir = f"{save_fmt}_{save_gender}"
 
                     if result.get("detected_format") and result["detected_format"] != fmt:
@@ -1066,6 +1333,7 @@ def main():
                             total_matches += 1
                             total_balls += len(balls)
                             total_rich += rich
+                            scraped_match_ids.append(match_id)
                         else:
                             print(
                                 f"    -> Saved metadata only (tables {tables_saved}) to {format_dir}/ [{elapsed:.0f}s]"
@@ -1077,12 +1345,48 @@ def main():
                         )
                     else:
                         print(f"    No data found [{elapsed:.0f}s]")
+
+                    # Log any innings failures to CSV
+                    for fail in result.get("innings_failures", []):
+                        log_scrape_error(
+                            output_dir,
+                            timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            match_id=match_id,
+                            series_id=series_id,
+                            series_name=series_info.get("name", ""),
+                            format=result.get("detected_format") or fmt,
+                            teams=teams,
+                            innings_expected=result.get("innings_expected", ""),
+                            innings_scraped=result.get("innings_scraped", ""),
+                            failed_innings=fail["innings"],
+                            error_type=fail["error_type"],
+                            error_message=fail["error_message"][:200],
+                        )
                 except Exception as e:
                     print(f"    ERROR: {e}")
+                    log_scrape_error(
+                        output_dir,
+                        timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        match_id=match_id,
+                        series_id=series_id,
+                        series_name=series_info.get("name", ""),
+                        format=fmt,
+                        teams=teams,
+                        error_type="match_error",
+                        error_message=str(e)[:200],
+                    )
 
                 time.sleep(1)
 
         browser.close()
+
+    # Save fixtures table (all matches: completed + upcoming)
+    if all_fixtures:
+        fixtures_path = save_fixtures(all_fixtures, output_dir)
+        if scraped_match_ids:
+            mark_fixtures_scraped(output_dir, scraped_match_ids)
+        fixture_upcoming = sum(1 for f in all_fixtures if f["status"] not in ("FINISHED", "POST"))
+        print(f"\nFixtures: saved {len(all_fixtures)} matches ({fixture_upcoming} upcoming) to {fixtures_path}")
 
     print(f"\n{'='*60}")
     print(f"DONE: {total_matches} matches, {total_balls} balls, {total_rich} rich")

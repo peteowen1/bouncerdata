@@ -109,6 +109,15 @@ jobs:
             done
             # Backwards compat: old format-only prefixes (t20i__, odi__, test__)
             if [ "$MATCHED" = "false" ]; then
+              # Handle fixtures.parquet (top-level, no prefix)
+              if [ "$BASENAME" = "fixtures.parquet" ]; then
+                mv "$f" "cricinfo/fixtures.parquet"
+                RESTORED=$((RESTORED + 1))
+                MATCHED=true
+              fi
+            fi
+            # Backwards compat: old format-only prefixes (t20i__, odi__, test__)
+            if [ "$MATCHED" = "false" ]; then
               for fmt in t20i odi test; do
                 if echo "$BASENAME" | grep -q "^${fmt}__"; then
                   LOCALNAME=$(echo "$BASENAME" | sed "s/^${fmt}__//")
@@ -129,12 +138,23 @@ jobs:
         continue-on-error: true
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" \
-            python scripts/discover_series.py --update
+            python scripts/discover_series.py --update --scan-parquets --cricinfo-dir cricinfo
+
+      - name: Commit updated series list
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add scripts/series_list.csv
+          git diff --cached --quiet || git commit -m "Auto-update series_list.csv with newly discovered series"
+          git push
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run scraper
         id: scrape
         run: |
-          ARGS="--output-dir cricinfo --max-matches ${{ inputs.max_matches || '50' }} --max-series ${{ inputs.max_series || '3' }}"
+          ARGS="--output-dir cricinfo --max-matches ${{ inputs.max_matches || '50' }} --max-series ${{ inputs.max_series || '3' }} --scan-parquets"
 
           # Add series filter (manual trigger only)
           SERIES_INPUT="${{ inputs.series_ids }}"
@@ -185,6 +205,10 @@ jobs:
             fi
           done
           rm -rf /tmp/cricinfo_upload
+          # Upload fixtures.parquet (top-level, not in a format subdirectory)
+          if [ -f "cricinfo/fixtures.parquet" ]; then
+            gh release upload cricinfo-rich "cricinfo/fixtures.parquet" --clobber 2>/dev/null && UPLOADED=$((UPLOADED + 1)) || true
+          fi
           echo "Uploaded $UPLOADED parquet files"
           echo "## Cricinfo Scrape Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
