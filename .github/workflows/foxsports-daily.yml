@@ -246,10 +246,10 @@ jobs:
           cy2 <- substring(cy, 3, 4)
           py2 <- substring(py, 3, 4)
           sample_ids <- c(
-            paste0("BBL", cy, "-", cy2, "0101"),    # Current year BBL
-            paste0("TEST", cy, "-", cy2, "0101"),   # Current year Test
-            paste0("T20I", py, "-", py2, "0101"),   # Previous year T20I
-            paste0("BBL", py, "-", py2, "0101")     # Fallback previous year BBL
+            paste0("BBL", py, "-", cy2, "0101"),     # BBL prev season, current year date
+            paste0("TEST", py, "-", cy2, "0101"),    # Test prev season, current year date
+            paste0("T20I", py, "-", py2, "0101"),    # T20I prev year
+            paste0("BBL", as.character(as.integer(py) - 1), "-", py2, "0101")  # Fallback 2 years ago
           )
 
           userkey <- NULL

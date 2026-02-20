@@ -47,6 +47,10 @@ fox_discovered_*.rds
 temp_*/
 *.duckdb.wal.backup
 
+# Python
+__pycache__/
+*.pyc
+
 # RStudio project file
 *.Rproj
 

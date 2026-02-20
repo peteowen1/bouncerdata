@@ -101,6 +101,108 @@ def _detect_gender_from_series(series_obj, name=""):
     return None
 
 
+def fetch_fixtures_fast(page, series_url, series_id, series_name="",
+                       series_format="", series_gender=""):
+    """Fetch fixtures using in-browser fetch() — no page navigation needed.
+
+    Much faster than discover_matches() because it avoids full page rendering.
+    Requires the browser to already have valid Akamai cookies (visit any
+    Cricinfo page first).
+
+    Returns list of fixture dicts (same schema as discover_matches all_fixtures).
+    """
+    url = series_url + "/match-schedule-fixtures-and-results"
+
+    # JavaScript that fetches the page HTML and extracts __NEXT_DATA__
+    JS_FETCH = """
+        async (url) => {
+            try {
+                const resp = await fetch(url);
+                if (!resp.ok) return { error: resp.status };
+                const html = await resp.text();
+                const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([\\s\\S]*?)<\\/script>/);
+                if (!match) return { error: 'no_next_data' };
+                const nd = JSON.parse(match[1]);
+                const data = nd?.props?.appPageProps?.data || {};
+                if (data.statusCode === 404) return { error: 404 };
+                const matches = data?.content?.matches || [];
+                const series = data?.series || {};
+                return {
+                    matches: matches.map(m => ({
+                        id: String(m.objectId || m.id || ''),
+                        state: m.state || '',
+                        title: m.title || '',
+                        startDate: m.startDate || '',
+                        startTime: m.startTime || '',
+                        statusText: m.statusText || '',
+                        teams: (m.teams || []).map(t => ({
+                            name: t.team?.longName || '',
+                            abbrev: t.team?.abbreviation || ''
+                        })),
+                        ground: m.ground?.name || '',
+                        country: m.ground?.country?.name || '',
+                        winnerId: m.winnerTeamId ? String(m.winnerTeamId) : ''
+                    })),
+                    seriesName: series.longName || series.name || '',
+                    seriesSlug: series.slug || '',
+                    ok: true
+                };
+            } catch (e) {
+                return { error: e.message };
+            }
+        }
+    """
+
+    try:
+        result = page.evaluate(JS_FETCH, url)
+    except Exception as e:
+        return []
+
+    if not result or not result.get("ok"):
+        return []
+
+    # Detect gender from page data
+    page_name = result.get("seriesName", "")
+    page_slug = result.get("seriesSlug", "")
+    s_name = series_name or page_name
+    s_gender = series_gender
+    if not s_gender or s_gender == "male":
+        # Check page data for gender hints
+        combined = (page_name + " " + page_slug).lower()
+        if any(kw in combined for kw in ("women", "female", "wbbl", "wpl")):
+            s_gender = "female"
+    s_gender = s_gender or "male"
+
+    fixtures = []
+    for m in result["matches"]:
+        if not m["id"]:
+            continue
+        teams = m.get("teams", [])
+        team1 = teams[0] if len(teams) > 0 else {}
+        team2 = teams[1] if len(teams) > 1 else {}
+        fixtures.append({
+            "match_id": m["id"],
+            "series_id": str(series_id),
+            "series_name": s_name,
+            "format": series_format,
+            "gender": s_gender,
+            "status": m["state"],
+            "start_date": m.get("startDate", ""),
+            "start_time": m.get("startTime", ""),
+            "title": m.get("title", ""),
+            "team1": team1.get("name", ""),
+            "team1_abbrev": team1.get("abbrev", ""),
+            "team2": team2.get("name", ""),
+            "team2_abbrev": team2.get("abbrev", ""),
+            "venue": m.get("ground", ""),
+            "country": m.get("country", ""),
+            "status_text": m.get("statusText", ""),
+            "winner_team_id": m.get("winnerId", ""),
+        })
+
+    return fixtures
+
+
 def discover_matches(page, series_id, series_url=None, series_name=None,
                      series_format=None, series_gender=None):
     """Discover all matches in a series from the schedule page.
@@ -109,30 +211,60 @@ def discover_matches(page, series_id, series_url=None, series_name=None,
         finished_matches: list of dicts for scraping (FINISHED/POST only)
         all_fixtures: list of dicts for fixtures table (all states including UPCOMING)
     """
+    # Slug URL is required — ID-only URLs return empty stub pages.
+    # If CSV URL fails (redirect/stale slug), fall back to ID-only as last resort.
     if not series_url:
         series_url = f"https://www.espncricinfo.com/series/{series_id}"
-
     url = series_url + "/match-schedule-fixtures-and-results"
 
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(1.5)
+    nd = None
+    for attempt_url in [url]:
+        try:
+            page.goto(attempt_url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(1.5)
 
-        nd_text = page.evaluate(
+            nd_text = page.evaluate(
+                """
+                () => {
+                    const el = document.getElementById('__NEXT_DATA__');
+                    return el ? el.textContent : null;
+                }
             """
-            () => {
-                const el = document.getElementById('__NEXT_DATA__');
-                return el ? el.textContent : null;
-            }
-        """
-        )
-        if not nd_text:
-            print(f"    No __NEXT_DATA__ on schedule page")
-            return [], []
+            )
+            if nd_text:
+                nd = json.loads(nd_text)
+                # Check if the page actually has series data (not a stub)
+                data_check = nd.get("props", {}).get("appPageProps", {}).get("data", {})
+                if "content" in data_check:
+                    break  # Good page
+                else:
+                    nd = None  # Stub page, try next
+        except Exception as e:
+            err_msg = str(e)
+            # Navigation interrupted = redirect, try waiting for final page
+            if "interrupted" in err_msg.lower():
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    time.sleep(1.5)
+                    nd_text = page.evaluate("""
+                        () => {
+                            const el = document.getElementById('__NEXT_DATA__');
+                            return el ? el.textContent : null;
+                        }
+                    """)
+                    if nd_text:
+                        nd = json.loads(nd_text)
+                        data_check = nd.get("props", {}).get("appPageProps", {}).get("data", {})
+                        if "content" in data_check:
+                            break
+                        nd = None
+                except Exception:
+                    pass
+            else:
+                print(f"    Error loading schedule page: {e}")
 
-        nd = json.loads(nd_text)
-    except Exception as e:
-        print(f"    Error loading schedule page: {e}")
+    if nd is None:
+        print(f"    No schedule data found")
         return [], []
 
     try:
@@ -1000,6 +1132,89 @@ FIXTURE_COLUMNS = [
 ]
 
 
+def _load_known_series(output_dir):
+    """Load set of series_ids already present in fixtures.parquet."""
+    import pyarrow.parquet as pq
+    outpath = Path(output_dir) / "fixtures.parquet"
+    if not outpath.exists():
+        return set()
+    try:
+        col = pq.read_table(outpath, columns=["series_id"]).column("series_id")
+        return {str(v.as_py()) for v in col}
+    except Exception:
+        return set()
+
+
+def _get_scraped_match_ids(output_dir):
+    """Scan output directories for match IDs that already have _balls.parquet files."""
+    scraped = set()
+    for fmt_dir in ["t20i_male", "t20i_female", "odi_male", "odi_female", "test_male", "test_female"]:
+        d = Path(output_dir) / fmt_dir
+        if d.exists():
+            for f in d.glob("*_balls.parquet"):
+                match_id = f.stem.replace("_balls", "")
+                scraped.add(match_id)
+    return scraped
+
+
+def load_unscraped_fixtures(output_dir, format_filter=None):
+    """Load completed fixtures that need ball-by-ball scraping.
+
+    Reads fixtures.parquet, filters for completed matches without ball-by-ball
+    data (checking both the fixtures flag and filesystem), groups by series.
+
+    Returns dict of series_id -> {series_name, format, gender, match_ids: [str]}
+    """
+    import pyarrow.parquet as pq
+
+    outpath = Path(output_dir) / "fixtures.parquet"
+    if not outpath.exists():
+        return {}
+
+    try:
+        table = pq.read_table(outpath)
+    except Exception as e:
+        print(f"Error reading fixtures.parquet: {e}", file=sys.stderr)
+        return {}
+
+    # Check filesystem for matches already scraped (handles stale has_ball_by_ball flags)
+    fs_scraped = _get_scraped_match_ids(output_dir)
+
+    series_matches = {}
+    for i in range(table.num_rows):
+        row = {col: table.column(col)[i].as_py() for col in table.column_names}
+
+        # Only completed matches
+        if row.get("status") not in ("FINISHED", "POST"):
+            continue
+
+        # Skip if already has ball-by-ball (fixture flag or filesystem)
+        if row.get("has_ball_by_ball"):
+            continue
+        match_id = str(row.get("match_id", ""))
+        if match_id in fs_scraped:
+            continue
+
+        # Format filter
+        if format_filter and row.get("format") != format_filter:
+            continue
+
+        series_id = str(row.get("series_id", ""))
+        if not series_id:
+            continue
+
+        if series_id not in series_matches:
+            series_matches[series_id] = {
+                "series_name": row.get("series_name", ""),
+                "format": row.get("format", ""),
+                "gender": row.get("gender", "male"),
+                "match_ids": [],
+            }
+        series_matches[series_id]["match_ids"].append(match_id)
+
+    return series_matches
+
+
 def save_fixtures(all_fixtures, output_dir):
     """Save/update fixtures.parquet with all discovered matches.
 
@@ -1036,7 +1251,8 @@ def save_fixtures(all_fixtures, output_dir):
                 existing[mid] = row
         except Exception as e:
             print(f"  Warning: Could not read existing fixtures.parquet: {e}", file=sys.stderr)
-            # Start fresh if existing file is corrupt
+            print(f"  SKIPPING save to avoid data loss (file may be locked by sync)", file=sys.stderr)
+            return None  # Don't overwrite with partial data
 
     # Merge: new fixtures overwrite existing (by match_id)
     for row in normalized:
@@ -1059,7 +1275,10 @@ def save_fixtures(all_fixtures, output_dir):
     try:
         table = pa.Table.from_pylist(all_rows)
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        pq.write_table(table, outpath)
+        # Atomic write: write to temp file then rename to avoid corruption
+        tmppath = outpath.with_suffix(".parquet.tmp")
+        pq.write_table(table, tmppath)
+        tmppath.replace(outpath)
         return str(outpath)
     except Exception as e:
         print(f"  Warning: Failed to write fixtures.parquet: {e}", file=sys.stderr)
@@ -1154,17 +1373,67 @@ def main():
         help="Re-scrape matches even if output files already exist",
     )
     parser.add_argument(
+        "--skip-known",
+        action="store_true",
+        help="Skip series already present in fixtures.parquet",
+    )
+    parser.add_argument(
         "--scan-parquets",
         action="store_true",
         help="Use build_series_list() to auto-discover series from parquets + CSV",
+    )
+    parser.add_argument(
+        "--fixtures-only",
+        action="store_true",
+        help="Fast fixture discovery only (no ball-by-ball scraping). Uses in-browser "
+             "fetch() for ~4x speedup over full page navigation.",
+    )
+    parser.add_argument(
+        "--from-fixtures",
+        action="store_true",
+        help="Scrape matches identified as unscraped in fixtures.parquet. "
+             "Only visits series that have completed matches without ball-by-ball data, "
+             "skipping everything else. Run --fixtures-only first to populate the table.",
     )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     series_list_path = Path(args.series_list)
 
+    target_match_ids = None  # Set by --from-fixtures to filter within series
+
     # Determine which series to scrape
-    if args.series:
+    if args.from_fixtures:
+        # Smart mode: only visit series with unscraped completed matches
+        unscraped = load_unscraped_fixtures(output_dir, format_filter=args.format)
+        if not unscraped:
+            print("No unscraped fixtures found in fixtures.parquet")
+            print("Run with --fixtures-only first to populate the fixtures table")
+            return
+
+        total_target = sum(len(info["match_ids"]) for info in unscraped.values())
+        print(f"From fixtures: {total_target} unscraped matches across {len(unscraped)} series")
+
+        # Look up series URLs from CSV for reliable navigation
+        merged = build_series_list(
+            csv_path=str(series_list_path),
+            cricinfo_dir=str(output_dir),
+        )
+
+        target_series = []
+        target_match_ids = {}
+        for sid, info in sorted(unscraped.items(),
+                                key=lambda x: int(x[0]), reverse=True):
+            csv_info = merged.get(sid, {})
+            target_series.append({
+                "series_id": sid,
+                "name": info["series_name"] or csv_info.get("name", f"Series {sid}"),
+                "format": info["format"] or csv_info.get("format", ""),
+                "gender": info["gender"] or csv_info.get("gender", "male"),
+                "url": csv_info.get("url", ""),
+            })
+            target_match_ids[sid] = set(info["match_ids"])
+    elif args.series:
         # Explicit series IDs: look up in merged series list
         merged = build_series_list(
             csv_path=str(series_list_path),
@@ -1217,10 +1486,33 @@ def main():
                 )
             )
 
+    # Skip series already in fixtures.parquet (if --skip-known)
+    if args.skip_known:
+        known_series = _load_known_series(output_dir)
+        before = len(target_series)
+        target_series = [s for s in target_series if s["series_id"] not in known_series]
+        skipped = before - len(target_series)
+        print(f"Skip-known: {skipped} series already in fixtures, {len(target_series)} remaining")
+
     print(f"Target: {len(target_series)} series")
-    for s in target_series:
-        print(f"  {s['series_id']}: {s['name']} ({s['format']})")
+    if len(target_series) <= 20:
+        for s in target_series:
+            suffix = ""
+            if target_match_ids and s['series_id'] in target_match_ids:
+                suffix = f" [{len(target_match_ids[s['series_id']])} matches]"
+            print(f"  {s['series_id']}: {s['name']} ({s['format']}){suffix}")
+    else:
+        for s in target_series[:10]:
+            suffix = ""
+            if target_match_ids and s['series_id'] in target_match_ids:
+                suffix = f" [{len(target_match_ids[s['series_id']])} matches]"
+            print(f"  {s['series_id']}: {s['name']} ({s['format']}){suffix}")
+        print(f"  ... and {len(target_series) - 10} more")
     print()
+
+    if not target_series:
+        print("No series to process")
+        return
 
     # Browser launch options
     launch_opts = {
@@ -1242,6 +1534,68 @@ def main():
         stealth.apply_stealth_sync(context)
 
         page = context.new_page()
+
+        # --fixtures-only: fast path using in-browser fetch()
+        if args.fixtures_only:
+            # Visit Cricinfo once to establish Akamai cookies
+            page.goto("https://www.espncricinfo.com/", wait_until="domcontentloaded", timeout=30000)
+            time.sleep(3)
+            print("Browser session established, starting fast fixture discovery...\n")
+
+            success = 0
+            errors = 0
+            total_fixtures_count = 0
+            start_time = time.time()
+            pending_fixtures = []  # Batch for periodic save
+
+            for i, series_info in enumerate(target_series):
+                series_id = series_info["series_id"]
+                fmt = series_info.get("format", "t20i")
+                gender = series_info.get("gender", "male")
+                name = series_info.get("name", "")
+                url = series_info.get("url") or f"https://www.espncricinfo.com/series/{series_id}"
+
+                fixtures = fetch_fixtures_fast(
+                    page, url, series_id,
+                    series_name=name, series_format=fmt, series_gender=gender,
+                )
+
+                if fixtures:
+                    success += 1
+                    total_fixtures_count += len(fixtures)
+                    all_fixtures.extend(fixtures)
+                    pending_fixtures.extend(fixtures)
+                    upcoming = sum(1 for f in fixtures if f["status"] not in ("FINISHED", "POST"))
+                    print(f"  [{i+1}/{len(target_series)}] {series_id}: {name[:55]} -> {len(fixtures)} ({upcoming} upcoming)")
+                else:
+                    errors += 1
+                    if errors <= 20:  # Only print first 20 errors
+                        print(f"  [{i+1}/{len(target_series)}] {series_id}: {name[:55]} -> no data")
+
+                # Batch save every 50 series (reduces I/O overhead)
+                if (i + 1) % 50 == 0:
+                    if pending_fixtures:
+                        save_fixtures(pending_fixtures, output_dir)
+                        pending_fixtures = []
+                    elapsed = time.time() - start_time
+                    rate = (i + 1) / elapsed
+                    print(f"\n  --- Progress: {i+1}/{len(target_series)} ({rate:.1f}/sec), "
+                          f"{success} ok, {errors} empty, {total_fixtures_count} fixtures ---\n")
+                    time.sleep(0.3)
+
+            # Final save for any remaining
+            if pending_fixtures:
+                save_fixtures(pending_fixtures, output_dir)
+
+            elapsed = time.time() - start_time
+            print(f"\n{'='*60}")
+            print(f"FIXTURES DONE: {success} series, {total_fixtures_count} fixtures in {elapsed:.0f}s")
+            print(f"({errors} series returned no data)")
+            print(f"{'='*60}")
+
+            context.close()
+            browser.close()
+            return
 
         total_matches = 0
         total_balls = 0
@@ -1273,8 +1627,14 @@ def main():
                 print(f"  Fixtures: {len(series_fixtures)} total ({upcoming_count} upcoming)")
                 save_fixtures(series_fixtures, output_dir)
 
+            # In --from-fixtures mode, only scrape the specific target matches
+            if target_match_ids and series_id in target_match_ids:
+                target_ids = target_match_ids[series_id]
+                finished_matches = [m for m in finished_matches if m["match_id"] in target_ids]
+
             if not finished_matches:
                 print(f"  No completed matches to scrape")
+                time.sleep(0.5)  # Throttle between series to avoid rate limiting
                 continue
 
             print(f"  Found {len(finished_matches)} completed matches")
