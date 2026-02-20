@@ -1034,8 +1034,9 @@ def save_fixtures(all_fixtures, output_dir):
                 for col in old_table.column_names:
                     row[col] = old_table.column(col)[i].as_py()
                 existing[mid] = row
-        except Exception:
-            pass  # If existing file is corrupt, start fresh
+        except Exception as e:
+            print(f"  Warning: Could not read existing fixtures.parquet: {e}", file=sys.stderr)
+            # Start fresh if existing file is corrupt
 
     # Merge: new fixtures overwrite existing (by match_id)
     for row in normalized:
@@ -1055,10 +1056,14 @@ def save_fixtures(all_fixtures, output_dir):
             if col not in row:
                 row[col] = False if col == "has_ball_by_ball" else ""
 
-    table = pa.Table.from_pylist(all_rows)
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, outpath)
-    return str(outpath)
+    try:
+        table = pa.Table.from_pylist(all_rows)
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, outpath)
+        return str(outpath)
+    except Exception as e:
+        print(f"  Warning: Failed to write fixtures.parquet: {e}", file=sys.stderr)
+        return None
 
 
 def mark_fixtures_scraped(output_dir, match_ids):
