@@ -144,7 +144,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add scripts/series_list.csv
           git diff --cached --quiet || git commit -m "Auto-update series_list.csv with newly discovered series"
-          git push
+          git push origin HEAD
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -200,19 +200,19 @@ jobs:
                 # Prefix asset name with dir so download can sort by format_gender
                 PREFIXED="/tmp/cricinfo_upload/${dir}__$(basename "$f")"
                 cp "$f" "$PREFIXED"
-                gh release upload cricinfo "$PREFIXED" --clobber 2>/dev/null && UPLOADED=$((UPLOADED + 1)) || true
+                gh release upload cricinfo "$PREFIXED" --clobber && UPLOADED=$((UPLOADED + 1)) || echo "  Warning: failed to upload $PREFIXED" >&2
               done
             fi
           done
           rm -rf /tmp/cricinfo_upload
           # Upload fixtures.parquet (top-level, not in a format subdirectory)
           if [ -f "cricinfo/fixtures.parquet" ]; then
-            gh release upload cricinfo "cricinfo/fixtures.parquet" --clobber 2>/dev/null && UPLOADED=$((UPLOADED + 1)) || true
+            gh release upload cricinfo "cricinfo/fixtures.parquet" --clobber && UPLOADED=$((UPLOADED + 1)) || echo "  Warning: failed to upload fixtures.parquet" >&2
           fi
           # Upload combined parquets for remote R loader access
           for f in cricinfo/combined/cricinfo_*.parquet; do
             [ -f "$f" ] || continue
-            gh release upload cricinfo "$f" --clobber 2>/dev/null && UPLOADED=$((UPLOADED + 1)) || true
+            gh release upload cricinfo "$f" --clobber && UPLOADED=$((UPLOADED + 1)) || echo "  Warning: failed to upload $f" >&2
           done
           echo "Uploaded $UPLOADED parquet files"
           echo "## Cricinfo Scrape Summary" >> $GITHUB_STEP_SUMMARY

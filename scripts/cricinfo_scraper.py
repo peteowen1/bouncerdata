@@ -156,6 +156,7 @@ def fetch_fixtures_fast(page, series_url, series_id, series_name="",
     try:
         result = page.evaluate(JS_FETCH, url)
     except Exception as e:
+        print(f"  Warning: fetch_fixtures_fast failed for {url}: {e}", file=sys.stderr)
         return []
 
     if not result or not result.get("ok"):

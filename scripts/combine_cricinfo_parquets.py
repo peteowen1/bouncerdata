@@ -156,6 +156,12 @@ def combine_table_type(cricinfo_dir, format_gender, table_type, output_dir):
             # Extract match_id from filename: {match_id}_{type}.parquet
             match_id = f.stem.rsplit(f"_{table_type}", 1)[0]
 
+            # Validate match_id is numeric (Cricinfo match IDs are always integers).
+            # Guards against filenames containing the table_type substring in the ID.
+            if not match_id.isdigit():
+                print(f"  Warning: Skipping {f.name} — extracted match_id '{match_id}' is not numeric", file=sys.stderr)
+                continue
+
             if table_type == "balls":
                 t = rename_balls_columns(t)
                 # Add match_id column (balls parquets don't have it)
@@ -186,7 +192,10 @@ def combine_table_type(cricinfo_dir, format_gender, table_type, output_dir):
     out_name = f"cricinfo_{table_type}_{format_gender}.parquet"
     out_path = Path(output_dir) / out_name
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(combined, out_path)
+    # Atomic write: temp file + rename prevents corruption on crash/sync conflict
+    tmp_path = out_path.with_suffix('.parquet.tmp')
+    pq.write_table(combined, tmp_path)
+    tmp_path.rename(out_path)
 
     return combined.num_rows
 

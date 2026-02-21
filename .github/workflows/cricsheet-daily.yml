@@ -157,11 +157,9 @@ jobs:
             cli::cli_alert_info("Found {length(json_files)} JSON files")
 
             # WORKAROUND: RcppSimdJson returns different structure than jsonlite
-            # Override bouncer's internal function to force jsonlite
+            # Force jsonlite via env var (bouncer's read_json_fast checks this)
             cli::cli_alert_info("Forcing jsonlite parser (RcppSimdJson has array simplification issues)")
-            assignInNamespace("read_json_fast", function(file_path) {
-              jsonlite::fromJSON(file_path, simplifyVector = FALSE)
-            }, ns = "bouncer")
+            Sys.setenv(BOUNCER_FORCE_JSONLITE = "true")
 
             # Parse all files
             all_matches <- list()
@@ -262,11 +260,9 @@ jobs:
             new_deliveries_by_partition <- list()
 
             # WORKAROUND: RcppSimdJson returns different structure than jsonlite
-            # Override bouncer's internal function to force jsonlite
+            # Force jsonlite via env var (bouncer's read_json_fast checks this)
             cli::cli_alert_info("Forcing jsonlite parser (RcppSimdJson has array simplification issues)")
-            assignInNamespace("read_json_fast", function(file_path) {
-              jsonlite::fromJSON(file_path, simplifyVector = FALSE)
-            }, ns = "bouncer")
+            Sys.setenv(BOUNCER_FORCE_JSONLITE = "true")
 
             for (jf in new_json_files) {
               tryCatch({

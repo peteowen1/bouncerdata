@@ -308,10 +308,15 @@ def discover_from_schedule_pages(page):
                 page.remove_listener("response", on_response)
                 continue
 
-            # Scroll down to trigger lazy-loaded content
-            for _ in range(3):
+            # Scroll down to trigger lazy-loaded content (adaptive like main scraper)
+            prev_match_count = len(intercepted_matches)
+            for scroll_i in range(20):
                 page.keyboard.press("End")
                 time.sleep(1)
+                if len(intercepted_matches) > prev_match_count:
+                    prev_match_count = len(intercepted_matches)
+                elif scroll_i >= 2:
+                    break  # No new data after at least 3 scrolls
 
             page.remove_listener("response", on_response)
 

@@ -167,12 +167,8 @@ jobs:
           cli::cli_h1("Fox Sports Daily Scrape")
 
           # WORKAROUND: RcppSimdJson returns different structure than jsonlite
-          # Override bouncer's internal function to force jsonlite (for consistency)
-          if ("read_json_fast" %in% ls(getNamespace("bouncer"))) {
-            assignInNamespace("read_json_fast", function(file_path) {
-              jsonlite::fromJSON(file_path, simplifyVector = FALSE)
-            }, ns = "bouncer")
-          }
+          # Force jsonlite via env var (bouncer's read_json_fast checks this)
+          Sys.setenv(BOUNCER_FORCE_JSONLITE = "true")
 
           # Parse inputs
           formats_input <- "${{ inputs.formats }}"

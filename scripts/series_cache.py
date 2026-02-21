@@ -147,7 +147,11 @@ def _season_from_date(date_str):
     try:
         year = int(date_str[:4])
         month = int(date_str[5:7]) if len(date_str) >= 7 else 1
-        if month >= 8:  # Aug onwards is "this/next" season
+        # Cricket season logic:
+        #   Aug-Dec: current season spans two years (e.g. "2025/26")
+        #   Jan-Apr: belongs to previous season (e.g. "2024/25")
+        #   May-Jul: mid-year season, just the year (e.g. "2025")
+        if month >= 8:
             return f"{year}/{str(year + 1)[-2:]}"
         else:
             return f"{year - 1}/{str(year)[-2:]}" if month <= 4 else str(year)
