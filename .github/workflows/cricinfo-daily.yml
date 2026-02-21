@@ -188,6 +188,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build combined parquets
+        run: python scripts/combine_cricinfo_parquets.py --cricinfo-dir cricinfo
+
       - name: Upload results to release
         run: |
           UPLOADED=0
@@ -209,6 +212,11 @@ jobs:
           if [ -f "cricinfo/fixtures.parquet" ]; then
             gh release upload cricinfo-rich "cricinfo/fixtures.parquet" --clobber 2>/dev/null && UPLOADED=$((UPLOADED + 1)) || true
           fi
+          # Upload combined parquets for remote R loader access
+          for f in cricinfo/combined/cricinfo_*.parquet; do
+            [ -f "$f" ] || continue
+            gh release upload cricinfo-rich "$f" --clobber 2>/dev/null && UPLOADED=$((UPLOADED + 1)) || true
+          done
           echo "Uploaded $UPLOADED parquet files"
           echo "## Cricinfo Scrape Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
