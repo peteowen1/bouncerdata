@@ -89,7 +89,7 @@ jobs:
           done
           mkdir -p /tmp/cricinfo_dl
           # Download all assets to temp dir, then sort by directory prefix
-          gh release download cricinfo-rich -D /tmp/cricinfo_dl --pattern "*.parquet" 2>/dev/null || true
+          gh release download cricinfo -D /tmp/cricinfo_dl --pattern "*.parquet" 2>/dev/null || true
           RESTORED=0
           for f in /tmp/cricinfo_dl/*.parquet; do
             [ -f "$f" ] || continue
@@ -99,8 +99,6 @@ jobs:
             for dir in t20i_male t20i_female odi_male odi_female test_male test_female; do
               if echo "$BASENAME" | grep -q "^${dir}__"; then
                 LOCALNAME=$(echo "$BASENAME" | sed "s/^${dir}__//")
-                # Backwards compat: rename _rich.parquet -> _balls.parquet
-                LOCALNAME=$(echo "$LOCALNAME" | sed "s/_rich\.parquet$/_balls.parquet/")
                 mv "$f" "cricinfo/$dir/$LOCALNAME"
                 RESTORED=$((RESTORED + 1))
                 MATCHED=true
@@ -121,7 +119,6 @@ jobs:
               for fmt in t20i odi test; do
                 if echo "$BASENAME" | grep -q "^${fmt}__"; then
                   LOCALNAME=$(echo "$BASENAME" | sed "s/^${fmt}__//")
-                  LOCALNAME=$(echo "$LOCALNAME" | sed "s/_rich\.parquet$/_balls.parquet/")
                   mv "$f" "cricinfo/${fmt}_male/$LOCALNAME"
                   RESTORED=$((RESTORED + 1))
                   break
@@ -175,14 +172,14 @@ jobs:
             ARGS="$ARGS --force"
           fi
 
-          echo "Running: python scripts/cricinfo_rich_scraper.py $ARGS"
+          echo "Running: python scripts/cricinfo_scraper.py $ARGS"
           xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" \
-            python scripts/cricinfo_rich_scraper.py $ARGS
+            python scripts/cricinfo_scraper.py $ARGS
 
       - name: Create release if needed
         run: |
-          gh release view cricinfo-rich 2>/dev/null || \
-            gh release create cricinfo-rich \
+          gh release view cricinfo 2>/dev/null || \
+            gh release create cricinfo \
               --title "Cricinfo Data" \
               --notes "Per-match tables: balls (Hawkeye), match metadata, innings scorecards"
         env:
@@ -203,19 +200,19 @@ jobs:
                 # Prefix asset name with dir so download can sort by format_gender
                 PREFIXED="/tmp/cricinfo_upload/${dir}__$(basename "$f")"
                 cp "$f" "$PREFIXED"
-                gh release upload cricinfo-rich "$PREFIXED" --clobber 2>/dev/null && UPLOADED=$((UPLOADED + 1)) || true
+                gh release upload cricinfo "$PREFIXED" --clobber 2>/dev/null && UPLOADED=$((UPLOADED + 1)) || true
               done
             fi
           done
           rm -rf /tmp/cricinfo_upload
           # Upload fixtures.parquet (top-level, not in a format subdirectory)
           if [ -f "cricinfo/fixtures.parquet" ]; then
-            gh release upload cricinfo-rich "cricinfo/fixtures.parquet" --clobber 2>/dev/null && UPLOADED=$((UPLOADED + 1)) || true
+            gh release upload cricinfo "cricinfo/fixtures.parquet" --clobber 2>/dev/null && UPLOADED=$((UPLOADED + 1)) || true
           fi
           # Upload combined parquets for remote R loader access
           for f in cricinfo/combined/cricinfo_*.parquet; do
             [ -f "$f" ] || continue
-            gh release upload cricinfo-rich "$f" --clobber 2>/dev/null && UPLOADED=$((UPLOADED + 1)) || true
+            gh release upload cricinfo "$f" --clobber 2>/dev/null && UPLOADED=$((UPLOADED + 1)) || true
           done
           echo "Uploaded $UPLOADED parquet files"
           echo "## Cricinfo Scrape Summary" >> $GITHUB_STEP_SUMMARY
