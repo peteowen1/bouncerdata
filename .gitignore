@@ -10,6 +10,7 @@ models/*.png
 
 # Scraped data
 fox_cricket/
+cricinfo/
 
 # Raw JSON data (can be re-downloaded from Cricsheet)
 json_files/
@@ -45,6 +46,10 @@ fox_discovered_*.rds
 *.log
 temp_*/
 *.duckdb.wal.backup
+
+# Python
+__pycache__/
+*.pyc
 
 # RStudio project file
 *.Rproj

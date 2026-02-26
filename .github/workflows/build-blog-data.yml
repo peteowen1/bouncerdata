@@ -1,0 +1,53 @@
+name: Build blog data
+
+on:
+  workflow_dispatch:
+  # Uncomment to trigger after your main data pipeline:
+  # workflow_run:
+  #   workflows: ["Update data"]
+  #   types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: arrow, dplyr
+
+      - name: Download source parquets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p source
+          for fmt in t20 odi test; do
+            gh release download player_rating -p "${fmt}_player_skill.parquet" -D source
+            gh release download team_rating   -p "${fmt}_team_skill.parquet"   -D source
+            gh release download venue_rating  -p "${fmt}_venue_skill.parquet"  -D source
+          done
+
+      - name: Aggregate
+        run: Rscript scripts/build_blog_data.R
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Upload to R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npm install -g wrangler
+          for f in blog/*.parquet; do
+            wrangler r2 object put "inthegame-data/$(basename $f)" --file "$f"
+          done
