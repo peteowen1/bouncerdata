@@ -91,6 +91,14 @@ def unify_and_concat(tables):
             elif all_fields[field.name] == pa.null():
                 # Upgrade from null to a concrete type
                 all_fields[field.name] = field.type
+            else:
+                # Promote int→float when types conflict (avoid truncation)
+                existing = all_fields[field.name]
+                incoming = field.type
+                if pa.types.is_integer(existing) and pa.types.is_floating(incoming):
+                    all_fields[field.name] = incoming
+                elif pa.types.is_floating(existing) and pa.types.is_integer(incoming):
+                    pass  # keep float
 
     unified_schema = pa.schema(
         [pa.field(name, all_fields[name]) for name in field_order]
@@ -116,7 +124,16 @@ def unify_and_concat(tables):
     return pa.concat_tables(unified_tables)
 
 
-def combine_table_type(cricinfo_dir, format_gender, table_type, output_dir):
+def extract_match_id(filepath, table_type):
+    """Extract numeric match_id from a per-match parquet filename.
+
+    Returns the match_id string, or None if the filename doesn't parse correctly.
+    """
+    match_id = filepath.stem.rsplit(f"_{table_type}", 1)[0]
+    return match_id if match_id.isdigit() else None
+
+
+def combine_table_type(cricinfo_dir, format_gender, table_type, output_dir, merge=False):
     """Combine all per-match parquets of a given type into one combined file.
 
     Args:
@@ -124,17 +141,37 @@ def combine_table_type(cricinfo_dir, format_gender, table_type, output_dir):
         format_gender: e.g. "t20i_male"
         table_type: "balls", "match", or "innings"
         output_dir: Where to write combined parquets
+        merge: If True and a combined file already exists, merge new per-match
+               data into it instead of rebuilding from scratch.
 
     Returns:
         Number of rows in combined file, or 0 if no data.
     """
     data_dir = Path(cricinfo_dir) / format_gender
+    out_name = f"cricinfo_{table_type}_{format_gender}.parquet"
+    out_path = Path(output_dir) / out_name
+
+    # In merge mode, we can return existing data even if no per-match dir exists
+    existing_table = None
+    existing_ids = set()
+    if merge and out_path.exists():
+        try:
+            existing_table = pq.read_table(out_path)
+            if "match_id" in existing_table.column_names:
+                # Convert to strings — filename-extracted IDs are always strings,
+                # but the scraper may store match_id as int in match/innings tables
+                existing_ids = set(str(x) for x in existing_table.column("match_id").to_pylist())
+        except Exception as e:
+            print(f"  Warning: Failed to read existing {out_name}, doing full rebuild: {e}", file=sys.stderr)
+            existing_table = None
+            existing_ids = set()
+
     if not data_dir.exists():
-        return 0
+        return existing_table.num_rows if existing_table is not None else 0
 
     pattern = f"*_{table_type}.parquet"
     files = sorted(data_dir.glob(pattern))
-    if not files:
+    if not files and existing_table is None:
         return 0
 
     # For match/innings files, only include those that have corresponding balls data.
@@ -146,56 +183,71 @@ def combine_table_type(cricinfo_dir, format_gender, table_type, output_dir):
             for f in data_dir.glob("*_balls.parquet")
         }
         files = [f for f in files if f.stem.rsplit(f"_{table_type}", 1)[0] in ball_ids]
+
+    # In merge mode, skip per-match files already in the existing combined file
+    if existing_ids:
+        files = [f for f in files if extract_match_id(f, table_type) not in existing_ids]
         if not files:
-            return 0
+            # Nothing new to add
+            return existing_table.num_rows
 
     tables = []
     for f in files:
         try:
             t = pq.read_table(f)
             # Extract match_id from filename: {match_id}_{type}.parquet
-            match_id = f.stem.rsplit(f"_{table_type}", 1)[0]
+            match_id = extract_match_id(f, table_type)
 
             # Validate match_id is numeric (Cricinfo match IDs are always integers).
             # Guards against filenames containing the table_type substring in the ID.
-            if not match_id.isdigit():
-                print(f"  Warning: Skipping {f.name} — extracted match_id '{match_id}' is not numeric", file=sys.stderr)
+            if match_id is None:
+                print(f"  Warning: Skipping {f.name} — extracted match_id is not numeric", file=sys.stderr)
                 continue
 
+            # Ensure every table has a valid match_id column from the filename.
+            # Balls parquets never have it; innings/match may have it but it can
+            # be null-typed if the scraper didn't capture it from the API.
+            match_id_arr = pa.array([match_id] * t.num_rows, type=pa.string())
             if table_type == "balls":
                 t = rename_balls_columns(t)
-                # Add match_id column (balls parquets don't have it)
-                t = t.append_column(
-                    "match_id",
-                    pa.array([match_id] * t.num_rows, type=pa.string()),
-                )
-            elif table_type == "innings":
-                # Innings parquets don't have match_id either
-                if "match_id" not in t.column_names:
-                    t = t.append_column(
-                        "match_id",
-                        pa.array([match_id] * t.num_rows, type=pa.string()),
-                    )
+                t = t.append_column("match_id", match_id_arr)
+            elif "match_id" not in t.column_names or t.schema.field("match_id").type == pa.null():
+                if "match_id" in t.column_names:
+                    t = t.drop("match_id")
+                t = t.append_column("match_id", match_id_arr)
 
             tables.append(t)
         except Exception as e:
             print(f"  Warning: Failed to read {f}: {e}", file=sys.stderr)
 
-    if not tables:
+    if not tables and existing_table is None:
         return 0
 
+    if not tables and existing_table is not None:
+        # No new per-match files, nothing to write
+        return existing_table.num_rows
+
     # Unify schemas (some files have null-type columns, others have concrete types)
-    combined = unify_and_concat(tables)
+    new_combined = unify_and_concat(tables)
+
+    # Merge with existing data if present
+    if existing_table is not None and new_combined is not None:
+        combined = unify_and_concat([existing_table, new_combined])
+        new_count = new_combined.num_rows
+        print(f"  Merged {new_count:,} new rows into existing {existing_table.num_rows:,} rows")
+    else:
+        combined = new_combined
+
+    if combined is None:
+        return 0
 
     # Output naming: cricinfo_{type}_{format}_{gender}.parquet
     # e.g. cricinfo_balls_t20i_male.parquet
-    out_name = f"cricinfo_{table_type}_{format_gender}.parquet"
-    out_path = Path(output_dir) / out_name
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # Atomic write: temp file + rename prevents corruption on crash/sync conflict
     tmp_path = out_path.with_suffix('.parquet.tmp')
     pq.write_table(combined, tmp_path)
-    tmp_path.rename(out_path)
+    tmp_path.replace(out_path)
 
     return combined.num_rows
 
@@ -220,6 +272,12 @@ def main():
         default=None,
         help="Specific format_gender dirs to process (default: all found)",
     )
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        default=False,
+        help="Merge new per-match data into existing combined files instead of rebuilding",
+    )
     args = parser.parse_args()
 
     cricinfo_dir = Path(args.cricinfo_dir)
@@ -242,12 +300,13 @@ def main():
         print("No format_gender directories found", file=sys.stderr)
         sys.exit(0)
 
-    print(f"Combining parquets for: {', '.join(format_genders)}")
+    mode = "merge" if args.merge else "full rebuild"
+    print(f"Combining parquets ({mode}) for: {', '.join(format_genders)}")
     total_files = 0
 
     for fg in format_genders:
         for table_type in ("balls", "match", "innings"):
-            n_rows = combine_table_type(cricinfo_dir, fg, table_type, output_dir)
+            n_rows = combine_table_type(cricinfo_dir, fg, table_type, output_dir, merge=args.merge)
             if n_rows > 0:
                 out_name = f"cricinfo_{table_type}_{fg}.parquet"
                 print(f"  {out_name}: {n_rows:,} rows")
