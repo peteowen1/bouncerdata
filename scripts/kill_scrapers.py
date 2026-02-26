@@ -18,6 +18,8 @@ def main():
         try:
             content = pf.read_text()
             for line in content.strip().split("\n"):
+                if "=" not in line:
+                    continue
                 key, val = line.split("=", 1)
                 if val != "unknown":
                     pid = int(val)
@@ -32,9 +34,11 @@ def main():
                             os.kill(pid, 9)
                         except ProcessLookupError:
                             pass
-            pf.unlink(missing_ok=True)
         except Exception as e:
             print(f"  Warning: {pf.name}: {e}")
+        finally:
+            # Always clean up the PID file, even if parsing failed
+            pf.unlink(missing_ok=True)
 
     if killed_pids:
         print(f"Killed {len(killed_pids)} processes from PID files: {killed_pids}")

@@ -26,17 +26,17 @@ Strategy:
 
 Usage:
   # CI (uses Playwright's bundled Chromium, run under xvfb-run):
-  xvfb-run --auto-servernum python cricinfo_rich_scraper.py --max-matches 50
+  xvfb-run --auto-servernum python cricinfo_scraper.py --max-matches 50
+
+  # Local Windows/Mac (uses system Chrome):
+  python cricinfo_scraper.py --system-chrome --series 1502138 --max-matches 5
+
+  # Override paths:
+  python cricinfo_scraper.py --output-dir /tmp/cricinfo --series-list my_series.csv
 
 Chrome Process Cleanup:
   On exit (normal, SIGINT, SIGTERM), the scraper kills its Chrome process tree
   to prevent orphaned browser instances from accumulating.
-
-  # Local Windows/Mac (uses system Chrome):
-  python cricinfo_rich_scraper.py --system-chrome --series 1502138 --max-matches 5
-
-  # Override paths:
-  python cricinfo_rich_scraper.py --output-dir /tmp/cricinfo --series-list my_series.csv
 """
 import sys
 import io
@@ -88,9 +88,9 @@ def _cleanup_browser():
     if browser is not None:
         try:
             browser.close()
-        except Exception:
-            pass
-        # Belt-and-suspenders: kill the Chrome process tree directly
+        except Exception as e:
+            print(f"  Cleanup: browser.close() failed: {e}", file=sys.stderr)
+        # Kill the Chrome process tree directly as fallback
         try:
             pid = browser.process.pid if hasattr(browser, 'process') and browser.process else None
             if pid:
@@ -102,15 +102,15 @@ def _cleanup_browser():
                     )
                 else:
                     os.kill(pid, signal.SIGKILL)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  Cleanup: Chrome process kill failed: {e}", file=sys.stderr)
 
     # Remove PID file
     if _pidfile_path:
         try:
             Path(_pidfile_path).unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  Cleanup: PID file removal failed: {e}", file=sys.stderr)
         _pidfile_path = None
 
 
@@ -332,62 +332,57 @@ def discover_matches(page, series_id, series_url=None, series_name=None,
         all_fixtures: list of dicts for fixtures table (all states including UPCOMING)
     """
     # Slug URL is required — ID-only URLs return empty stub pages.
-    # If CSV URL fails (redirect/stale slug), fall back to ID-only as last resort.
     if not series_url:
         series_url = f"https://www.espncricinfo.com/series/{series_id}"
     url = series_url + "/match-schedule-fixtures-and-results"
 
     nd = None
-    for attempt_url in [url]:
-        try:
-            page.goto(attempt_url, wait_until="domcontentloaded", timeout=30000)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(1.5)
+
+        # Recover if page crashed during navigation
+        if not _page_is_alive(page):
+            if not _recover_page(page, url):
+                return [], []
             time.sleep(1.5)
 
-            # Recover if page crashed during navigation
-            if not _page_is_alive(page):
-                if not _recover_page(page, attempt_url):
-                    continue
-                time.sleep(1.5)
-
-            nd_text = page.evaluate(
-                """
-                () => {
-                    const el = document.getElementById('__NEXT_DATA__');
-                    return el ? el.textContent : null;
-                }
+        nd_text = page.evaluate(
             """
-            )
-            if nd_text:
-                nd = json.loads(nd_text)
-                # Check if the page actually has series data (not a stub)
-                data_check = nd.get("props", {}).get("appPageProps", {}).get("data", {})
-                if "content" in data_check:
-                    break  # Good page
-                else:
-                    nd = None  # Stub page, try next
-        except Exception as e:
-            err_msg = str(e)
-            # Navigation interrupted = redirect, try waiting for final page
-            if "interrupted" in err_msg.lower():
-                try:
-                    page.wait_for_load_state("domcontentloaded", timeout=10000)
-                    time.sleep(1.5)
-                    nd_text = page.evaluate("""
-                        () => {
-                            const el = document.getElementById('__NEXT_DATA__');
-                            return el ? el.textContent : null;
-                        }
-                    """)
-                    if nd_text:
-                        nd = json.loads(nd_text)
-                        data_check = nd.get("props", {}).get("appPageProps", {}).get("data", {})
-                        if "content" in data_check:
-                            break
+            () => {
+                const el = document.getElementById('__NEXT_DATA__');
+                return el ? el.textContent : null;
+            }
+        """
+        )
+        if nd_text:
+            nd = json.loads(nd_text)
+            # Check if the page actually has series data (not a stub)
+            data_check = nd.get("props", {}).get("appPageProps", {}).get("data", {})
+            if "content" not in data_check:
+                nd = None  # Stub page
+    except Exception as e:
+        err_msg = str(e)
+        # Navigation interrupted = redirect, try waiting for final page
+        if "interrupted" in err_msg.lower():
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=10000)
+                time.sleep(1.5)
+                nd_text = page.evaluate("""
+                    () => {
+                        const el = document.getElementById('__NEXT_DATA__');
+                        return el ? el.textContent : null;
+                    }
+                """)
+                if nd_text:
+                    nd = json.loads(nd_text)
+                    data_check = nd.get("props", {}).get("appPageProps", {}).get("data", {})
+                    if "content" not in data_check:
                         nd = None
-                except Exception:
-                    pass
-            else:
-                print(f"    Error loading schedule page: {e}")
+            except Exception:
+                print(f"    Error recovering from redirect: {e}", file=sys.stderr)
+        else:
+            print(f"    Error loading schedule page: {e}")
 
     if nd is None:
         print(f"    No schedule data found")
@@ -471,11 +466,11 @@ def scrape_match_commentary(browser, context, page, match_url, max_innings=2):
     """Scrape all ball-by-ball data for a match using scroll-based pagination.
 
     Returns dict with:
-        balls: list of ball dicts (rich or basic)
-        has_rich: bool - whether wagonX/predictions data is available
+        balls: list of ball dicts (hawkeye or basic)
+        has_hawkeye: bool - whether wagonX/predictions data is available
         match_meta: dict - match-level metadata (venue, toss, result, etc.)
         innings_data: list of dicts - batting scorecards with player details
-        scorecard: dict - scorecard data if available (fallback when no rich data)
+        scorecard: dict - scorecard data if available (fallback when no hawkeye data)
     """
 
     # Set up response interceptor
@@ -598,7 +593,7 @@ def _scrape_innings_loop(page, api_responses, max_innings):
     """
     )
 
-    has_rich = initial_check.get("hasRich", False)
+    has_hawkeye = initial_check.get("hasRich", False)
     has_balls = initial_check.get("hasBalls", False)
     detected_format = _detect_format(initial_check)
     detected_gender = _detect_gender(initial_check)
@@ -609,11 +604,11 @@ def _scrape_innings_loop(page, api_responses, max_innings):
 
     if not has_balls:
         scorecard = _extract_scorecard(page)
-        return {"balls": [], "has_rich": False, "scorecard": scorecard,
+        return {"balls": [], "has_hawkeye": False, "scorecard": scorecard,
                 "match_meta": match_meta, "innings_data": innings_data,
                 "detected_format": detected_format, "detected_gender": detected_gender}
 
-    if not has_rich:
+    if not has_hawkeye:
         print(f"      (no rich data - scraping basic ball-by-ball)")
 
     # Discover available innings from the dropdown
@@ -770,7 +765,7 @@ def _scrape_innings_loop(page, api_responses, max_innings):
         all_balls.extend(innings_balls)
 
     innings_scraped = len(set(b.get("inningNumber") for b in all_balls)) if all_balls else 0
-    return {"balls": all_balls, "has_rich": has_rich, "scorecard": None,
+    return {"balls": all_balls, "has_hawkeye": has_hawkeye, "scorecard": None,
             "match_meta": match_meta, "innings_data": innings_data,
             "detected_format": detected_format, "detected_gender": detected_gender,
             "innings_expected": len(available_innings), "innings_scraped": innings_scraped,
@@ -1099,7 +1094,8 @@ def _discover_innings(page):
         reordered.extend(rest)
 
         return reordered
-    except Exception:
+    except Exception as e:
+        print(f"  Warning: Innings discovery failed, using fallback: {e}", file=sys.stderr)
         try:
             page.keyboard.press("Escape")
         except Exception:
@@ -1252,21 +1248,27 @@ def save_all_tables(balls, match_meta, innings_data, match_id, format_dir, outpu
         flat = [flatten_ball(b) for b in balls]
         table = pa.Table.from_pylist(flat)
         outpath = outdir / f"{match_id}_balls.parquet"
-        pq.write_table(table, outpath)
+        tmppath = outpath.with_suffix(".parquet.tmp")
+        pq.write_table(table, tmppath)
+        tmppath.replace(outpath)
         saved["balls"] = str(outpath)
 
     # Match metadata table (single row)
     if match_meta:
         table = pa.Table.from_pylist([match_meta])
         outpath = outdir / f"{match_id}_match.parquet"
-        pq.write_table(table, outpath)
+        tmppath = outpath.with_suffix(".parquet.tmp")
+        pq.write_table(table, tmppath)
+        tmppath.replace(outpath)
         saved["match"] = str(outpath)
 
     # Innings table (one row per batsman per innings)
     if innings_data:
         table = pa.Table.from_pylist(innings_data)
         outpath = outdir / f"{match_id}_innings.parquet"
-        pq.write_table(table, outpath)
+        tmppath = outpath.with_suffix(".parquet.tmp")
+        pq.write_table(table, tmppath)
+        tmppath.replace(outpath)
         saved["innings"] = str(outpath)
 
     return saved
@@ -1294,7 +1296,8 @@ def _load_known_series(output_dir, fixtures_file=None):
     try:
         col = pq.read_table(outpath, columns=["series_id"]).column("series_id")
         return {str(v.as_py()) for v in col}
-    except Exception:
+    except Exception as e:
+        print(f"  Warning: Could not read fixtures for known series (will re-discover all): {e}", file=sys.stderr)
         return set()
 
 
@@ -1458,9 +1461,12 @@ def mark_fixtures_scraped(output_dir, match_ids, fixtures_file=None):
             if str(row.get("match_id")) in scraped_set:
                 row["has_ball_by_ball"] = True
             rows.append(row)
-        pq.write_table(pa.Table.from_pylist(rows), outpath)
-    except Exception:
-        pass
+        # Atomic write: temp file then rename to avoid corruption on crash
+        tmppath = outpath.with_suffix(".parquet.tmp")
+        pq.write_table(pa.Table.from_pylist(rows), tmppath)
+        tmppath.replace(outpath)
+    except Exception as e:
+        print(f"  Warning: Failed to update fixtures with scraped status: {e}", file=sys.stderr)
 
 
 def _infer_gender(name):
@@ -1862,7 +1868,7 @@ def main():
 
                     # Use detected format/gender, fall back to CSV values
                     save_fmt = result.get("detected_format") or fmt
-                    save_gender = result.get("detected_gender")
+                    save_gender = result.get("detected_gender") or gender
                     if not save_gender:
                         save_gender = "male"
                         print(f"    WARNING: Could not detect gender, defaulting to 'male'")
@@ -1885,7 +1891,7 @@ def main():
                             rich = sum(
                                 1 for b in balls if b.get("wagonX") is not None
                             )
-                            label = "rich" if result["has_rich"] else "basic"
+                            label = "hawkeye" if result["has_hawkeye"] else "basic"
                             print(
                                 f"    -> Saved {len(balls)} balls ({rich} {label}) + tables {tables_saved} to {format_dir}/ [{elapsed:.0f}s]"
                             )

@@ -123,7 +123,10 @@ cli_h2("Managing Release")
 
 existing_releases <- tryCatch(
   pb_releases(repo = REPO),
-  error = function(e) data.frame()
+  error = function(e) {
+    cli_alert_warning("Could not list releases: {e$message}")
+    data.frame()
+  }
 )
 
 if (release_tag %in% existing_releases$tag_name) {
@@ -159,6 +162,7 @@ if (release_tag %in% existing_releases$tag_name) {
 # Upload files
 cli_h2("Uploading Files")
 
+upload_failures <- 0L
 for (i in seq_along(parquet_files)) {
   file_path <- parquet_files[i]
   file_name <- basename(file_path)
@@ -175,13 +179,18 @@ for (i in seq_along(parquet_files)) {
     )
     cli_alert_success("  Uploaded: {file_name}")
   }, error = function(e) {
+    upload_failures <<- upload_failures + 1L
     cli_alert_danger("  Failed: {file_name} - {e$message}")
   })
 }
 
 # Summary
 cli_h2("Upload Complete")
-cli_alert_success("Uploaded {length(parquet_files)} files to {REPO}")
+uploaded_count <- length(parquet_files) - upload_failures
+cli_alert_success("Uploaded {uploaded_count}/{length(parquet_files)} files to {REPO}")
+if (upload_failures > 0L) {
+  cli_alert_warning("{upload_failures} upload(s) failed")
+}
 cli_alert_info("Release URL: https://github.com/{REPO}/releases/tag/{release_tag}")
 
 # Verify

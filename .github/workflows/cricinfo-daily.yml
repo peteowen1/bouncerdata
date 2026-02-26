@@ -13,7 +13,7 @@
 # Schedule: Daily at 12 PM UTC (after international matches)
 # Runtime: ~10-60 min depending on number of new matches
 #
-# On schedule: scrapes top 3 series per format from series_list.csv
+# On schedule: scrapes top N series per format from series_list.csv (default: 3)
 # On manual trigger: accepts series IDs, format filter, max matches, force flag
 
 name: Cricinfo Scrape
@@ -59,6 +59,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: dev
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -141,12 +143,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Discover new series
+        id: discover
         continue-on-error: true
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" \
             python scripts/discover_series.py --update --scan-parquets --cricinfo-dir cricinfo
 
       - name: Commit updated series list
+        if: steps.discover.outcome == 'success'
         continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
@@ -223,12 +227,16 @@ jobs:
             [ -f "$f" ] || continue
             gh release upload cricinfo "$f" --clobber && UPLOADED=$((UPLOADED + 1)) || echo "  Warning: failed to upload $f" >&2
           done
-          echo "Uploaded $UPLOADED parquet files"
+          TOTAL=$(find cricinfo -name "*.parquet" 2>/dev/null | wc -l)
+          echo "Uploaded $UPLOADED / $TOTAL parquet files"
           echo "## Cricinfo Scrape Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          TOTAL=$(find cricinfo -name "*.parquet" 2>/dev/null | wc -l)
           echo "- **Total parquet files**: $TOTAL" >> $GITHUB_STEP_SUMMARY
           echo "- **Uploaded this run**: $UPLOADED" >> $GITHUB_STEP_SUMMARY
+          if [ "$UPLOADED" -eq 0 ] && [ "$TOTAL" -gt 0 ]; then
+            echo "::error::All uploads failed ($TOTAL files available but 0 uploaded)"
+            exit 1
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

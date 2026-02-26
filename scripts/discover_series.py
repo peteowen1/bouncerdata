@@ -257,7 +257,9 @@ def discover_from_live_scores(page):
         return all_from_matches, key_series
 
     except Exception as e:
-        print(f"    Error: {e}")
+        import traceback
+        print(f"    Error in live scores discovery: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return [], []
 
 
@@ -288,8 +290,8 @@ def discover_from_schedule_pages(page):
             # The API returns match collections — extract matches from various shapes
             matches = _extract_matches_from_api(body)
             intercepted_matches.extend(matches)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"    Warning: Failed to parse schedule API response: {exc}", file=sys.stderr)
 
     for schedule_url in SCHEDULE_URLS:
         try:
@@ -486,45 +488,43 @@ def main():
     web_discovered = {}  # series_id → entry dict
 
     if not args.skip_web:
-        needs_browser = not args.skip_web
-        if needs_browser:
-            launch_opts = {
-                "headless": False,
-                "args": ["--disable-blink-features=AutomationControlled"],
-            }
-            if args.system_chrome:
-                launch_opts["channel"] = "chrome"
+        launch_opts = {
+            "headless": False,
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        if args.system_chrome:
+            launch_opts["channel"] = "chrome"
 
-            with sync_playwright() as p:
-                browser = p.chromium.launch(**launch_opts)
-                context = browser.new_context(
-                    viewport={"width": 1280, "height": 900},
-                    locale="en-US",
-                )
-                stealth.apply_stealth_sync(context)
-                page = context.new_page()
+        with sync_playwright() as p:
+            browser = p.chromium.launch(**launch_opts)
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                locale="en-US",
+            )
+            stealth.apply_stealth_sync(context)
+            page = context.new_page()
 
-                # Tier 2: Live scores (SSR)
-                if not args.schedule_only:
-                    print(f"\n{'='*60}")
-                    print("Tier 2: Discovering series from live scores page")
-                    print(f"{'='*60}")
-                    match_series, key_series = discover_from_live_scores(page)
-                    for s in match_series:
-                        _add_series(web_discovered, s["series_id"], s)
-                    for s in key_series:
-                        _add_series(web_discovered, s["series_id"], s)
+            # Tier 2: Live scores (SSR)
+            if not args.schedule_only:
+                print(f"\n{'='*60}")
+                print("Tier 2: Discovering series from live scores page")
+                print(f"{'='*60}")
+                match_series, key_series = discover_from_live_scores(page)
+                for s in match_series:
+                    _add_series(web_discovered, s["series_id"], s)
+                for s in key_series:
+                    _add_series(web_discovered, s["series_id"], s)
 
-                # Tier 3: Schedule pages
-                if not args.skip_schedule:
-                    print(f"\n{'='*60}")
-                    print("Tier 3: Discovering series from schedule pages")
-                    print(f"{'='*60}")
-                    schedule_series = discover_from_schedule_pages(page)
-                    for s in schedule_series:
-                        _add_series(web_discovered, s["series_id"], s)
+            # Tier 3: Schedule pages
+            if not args.skip_schedule:
+                print(f"\n{'='*60}")
+                print("Tier 3: Discovering series from schedule pages")
+                print(f"{'='*60}")
+                schedule_series = discover_from_schedule_pages(page)
+                for s in schedule_series:
+                    _add_series(web_discovered, s["series_id"], s)
 
-                browser.close()
+            browser.close()
 
     # ── Merge all sources ──
     merged = merge_series(csv_cache, parquet_series, web_discovered)
@@ -572,4 +572,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(0 if main() >= 0 else 1)
+    main()

@@ -15,11 +15,12 @@ Usage:
     # With web discoveries merged in:
     series = build_series_list(csv_path="scripts/series_list.csv",
                                 cricinfo_dir="../cricinfo",
-                                web_discoveries=[...])
+                                web_discoveries={...})
 """
 
 import csv
 import re
+import sys
 from pathlib import Path
 
 # ============================================================
@@ -110,8 +111,8 @@ def scan_parquets_for_series(cricinfo_dir):
                     "max_innings": str(MAX_INNINGS.get(fmt, 4)),
                     "gender": gender,
                 }
-        except Exception:
-            # Skip unreadable files silently
+        except Exception as e:
+            print(f"  Warning: Could not read {mf.name}: {e}", file=sys.stderr)
             continue
 
     return series

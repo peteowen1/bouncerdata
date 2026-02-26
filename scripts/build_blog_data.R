@@ -10,7 +10,14 @@ for (fmt in c("t20", "odi", "test")) {
   cat(sprintf("Processing %s...\n", toupper(fmt)))
 
   # Player skill (batting + bowling from same file)
-  ps <- read_parquet(sprintf("source/%s_player_skill.parquet", fmt))
+  ps_path <- sprintf("source/%s_player_skill.parquet", fmt)
+  if (!file.exists(ps_path)) stop("Missing source file: ", ps_path)
+  ps <- read_parquet(ps_path)
+  required_cols <- c("batter_id", "batter_balls_faced", "batter_scoring_index",
+                     "batter_survival_rate", "bowler_id", "bowler_balls_bowled",
+                     "bowler_economy_index", "bowler_strike_rate")
+  missing <- setdiff(required_cols, names(ps))
+  if (length(missing)) stop("Missing columns in ", ps_path, ": ", paste(missing, collapse = ", "))
 
   batting <- ps |>
     group_by(batter_id) |>

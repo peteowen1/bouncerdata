@@ -92,13 +92,19 @@ def unify_and_concat(tables):
                 # Upgrade from null to a concrete type
                 all_fields[field.name] = field.type
             else:
-                # Promote int→float when types conflict (avoid truncation)
+                # Promote types when they conflict to avoid cast errors
                 existing = all_fields[field.name]
                 incoming = field.type
-                if pa.types.is_integer(existing) and pa.types.is_floating(incoming):
-                    all_fields[field.name] = incoming
+                if existing == incoming:
+                    pass
+                elif pa.types.is_integer(existing) and pa.types.is_floating(incoming):
+                    all_fields[field.name] = incoming  # int→float
                 elif pa.types.is_floating(existing) and pa.types.is_integer(incoming):
                     pass  # keep float
+                elif pa.types.is_string(existing) or pa.types.is_string(incoming):
+                    all_fields[field.name] = pa.string()  # any conflict with string→string
+                elif pa.types.is_large_string(existing) or pa.types.is_large_string(incoming):
+                    all_fields[field.name] = pa.large_string()
 
     unified_schema = pa.schema(
         [pa.field(name, all_fields[name]) for name in field_order]
@@ -112,7 +118,11 @@ def unify_and_concat(tables):
             if field.name in t.column_names:
                 col = t.column(field.name)
                 if col.type != field.type:
-                    col = col.cast(field.type)
+                    try:
+                        col = col.cast(field.type)
+                    except (pa.ArrowInvalid, pa.ArrowNotImplementedError):
+                        # Fallback: cast to string if types are truly incompatible
+                        col = col.cast(pa.string())
                 columns[field.name] = col
             else:
                 # Missing column — fill with nulls
@@ -175,8 +185,8 @@ def combine_table_type(cricinfo_dir, format_gender, table_type, output_dir, merg
         return 0
 
     # For match/innings files, only include those that have corresponding balls data.
-    # The scraper saves match metadata for all matches in a series, but only creates
-    # balls/innings files for matches it actually scrapes ball-by-ball.
+    # This ensures combined files only contain matches with full ball-by-ball coverage,
+    # even though the scraper may save match and innings metadata independently.
     if table_type in ("match", "innings"):
         ball_ids = {
             f.stem.rsplit("_balls", 1)[0]
@@ -192,6 +202,7 @@ def combine_table_type(cricinfo_dir, format_gender, table_type, output_dir, merg
             return existing_table.num_rows
 
     tables = []
+    read_failures = 0
     for f in files:
         try:
             t = pq.read_table(f)
@@ -202,6 +213,7 @@ def combine_table_type(cricinfo_dir, format_gender, table_type, output_dir, merg
             # Guards against filenames containing the table_type substring in the ID.
             if match_id is None:
                 print(f"  Warning: Skipping {f.name} — extracted match_id is not numeric", file=sys.stderr)
+                read_failures += 1
                 continue
 
             # Ensure every table has a valid match_id column from the filename.
@@ -218,7 +230,11 @@ def combine_table_type(cricinfo_dir, format_gender, table_type, output_dir, merg
 
             tables.append(t)
         except Exception as e:
+            read_failures += 1
             print(f"  Warning: Failed to read {f}: {e}", file=sys.stderr)
+
+    if read_failures:
+        print(f"  Warning: {read_failures}/{len(files)} files failed to read for {format_gender}/{table_type}", file=sys.stderr)
 
     if not tables and existing_table is None:
         return 0
@@ -297,8 +313,8 @@ def main():
                 format_genders.append(d.name)
 
     if not format_genders:
-        print("No format_gender directories found", file=sys.stderr)
-        sys.exit(0)
+        print("Warning: No format_gender directories found", file=sys.stderr)
+        sys.exit(1)
 
     mode = "merge" if args.merge else "full rebuild"
     print(f"Combining parquets ({mode}) for: {', '.join(format_genders)}")

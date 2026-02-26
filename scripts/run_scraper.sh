@@ -1,6 +1,8 @@
 #!/bin/bash
+set -e
 # Wrapper script that ensures Python + Chrome are killed when this shell dies.
-# When TaskStop kills the bash process, the trap fires and kills Python.
+# When the parent process sends a termination signal (e.g., Ctrl+C, CI timeout),
+# the trap fires and kills the Python scraper process.
 
 cleanup() {
     if [ -n "$PYTHON_PID" ] && kill -0 "$PYTHON_PID" 2>/dev/null; then
@@ -19,3 +21,4 @@ python scripts/cricinfo_scraper.py "$@" &
 PYTHON_PID=$!
 echo "[wrapper] Python PID: $PYTHON_PID"
 wait "$PYTHON_PID"
+exit $?
