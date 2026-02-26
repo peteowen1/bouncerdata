@@ -111,6 +111,8 @@ def unify_and_concat(tables):
     )
 
     # Cast each table to the unified schema
+    # Track fields that had to fall back to string (schema may diverge)
+    string_fallback_fields = set()
     unified_tables = []
     for t in tables:
         columns = {}
@@ -118,20 +120,25 @@ def unify_and_concat(tables):
             if field.name in t.column_names:
                 col = t.column(field.name)
                 if col.type != field.type:
-                    try:
-                        col = col.cast(field.type)
-                    except (pa.ArrowInvalid, pa.ArrowNotImplementedError):
-                        # Fallback: cast to string if types are truly incompatible
+                    if field.name in string_fallback_fields:
+                        # Already fell back to string for this field — cast directly
                         col = col.cast(pa.string())
+                    else:
+                        try:
+                            col = col.cast(field.type)
+                        except (pa.ArrowInvalid, pa.ArrowNotImplementedError) as e:
+                            print(f"  Warning: Column '{field.name}' cast {col.type}->{field.type} failed, "
+                                  f"falling back to string: {e}", file=sys.stderr)
+                            col = col.cast(pa.string())
+                            string_fallback_fields.add(field.name)
                 columns[field.name] = col
             else:
                 # Missing column — fill with nulls
-                columns[field.name] = pa.nulls(t.num_rows, type=field.type)
-        unified_tables.append(
-            pa.table(columns, schema=unified_schema)
-        )
+                col_type = pa.string() if field.name in string_fallback_fields else field.type
+                columns[field.name] = pa.nulls(t.num_rows, type=col_type)
+        unified_tables.append(pa.table(columns))
 
-    return pa.concat_tables(unified_tables)
+    return pa.concat_tables(unified_tables, promote_options="permissive")
 
 
 def extract_match_id(filepath, table_type):

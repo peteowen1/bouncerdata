@@ -107,9 +107,8 @@ jobs:
                 break
               fi
             done
-            # Backwards compat: old format-only prefixes (t20i__, odi__, test__)
+            # Handle fixtures.parquet (top-level, no prefix)
             if [ "$MATCHED" = "false" ]; then
-              # Handle fixtures.parquet (top-level, no prefix)
               if [ "$BASENAME" = "fixtures.parquet" ]; then
                 mv "$f" "cricinfo/fixtures.parquet"
                 RESTORED=$((RESTORED + 1))

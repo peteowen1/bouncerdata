@@ -133,8 +133,8 @@ def _register_browser(browser, pidfile_dir=None):
             chrome_pid = browser.process.pid if hasattr(browser, 'process') and browser.process else "unknown"
             with open(_pidfile_path, "w") as f:
                 f.write(f"python_pid={os.getpid()}\nchrome_pid={chrome_pid}\n")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  Warning: Could not write PID file {_pidfile_path}: {e}", file=sys.stderr)
 
     # Register cleanup handlers
     atexit.register(_cleanup_browser)
@@ -279,6 +279,8 @@ def fetch_fixtures_fast(page, series_url, series_id, series_name="",
         return []
 
     if not result or not result.get("ok"):
+        error_detail = result.get("error", "unknown") if result else "null_result"
+        print(f"  Warning: fetch_fixtures_fast error for series: {error_detail}", file=sys.stderr)
         return []
 
     # Detect gender from page data
@@ -379,8 +381,8 @@ def discover_matches(page, series_id, series_url=None, series_name=None,
                     data_check = nd.get("props", {}).get("appPageProps", {}).get("data", {})
                     if "content" not in data_check:
                         nd = None
-            except Exception:
-                print(f"    Error recovering from redirect: {e}", file=sys.stderr)
+            except Exception as inner_e:
+                print(f"    Error recovering from redirect: {inner_e} (original: {e})", file=sys.stderr)
         else:
             print(f"    Error loading schedule page: {e}")
 
@@ -470,7 +472,12 @@ def scrape_match_commentary(browser, context, page, match_url, max_innings=2):
         has_hawkeye: bool - whether wagonX/predictions data is available
         match_meta: dict - match-level metadata (venue, toss, result, etc.)
         innings_data: list of dicts - batting scorecards with player details
-        scorecard: dict - scorecard data if available (fallback when no hawkeye data)
+        scorecard: dict - scorecard data if available (fallback when no ball-by-ball data)
+        detected_format: str or None - auto-detected format from page data
+        detected_gender: str or None - auto-detected gender from page data
+        innings_expected: int - number of available innings from dropdown
+        innings_scraped: int - number of innings with captured ball data
+        innings_failures: list of dicts - details of innings that failed to scrape
     """
 
     # Set up response interceptor
@@ -512,6 +519,7 @@ def scrape_match_commentary(browser, context, page, match_url, max_innings=2):
         page.remove_listener("response", on_response)
         # Retry once with a fresh context
         print(f"      Akamai block detected, retrying with fresh context...")
+        context2 = None
         try:
             context2 = browser.new_context(
                 viewport={"width": 1280, "height": 900},
@@ -545,17 +553,19 @@ def scrape_match_commentary(browser, context, page, match_url, max_innings=2):
 
             title2 = page2.title()
             if "access denied" in title2.lower():
-                page2.remove_listener("response", on_response2)
-                context2.close()
                 raise Exception("Blocked by Akamai (retry also failed)")
 
             # Continue scraping with the new page/context
             result = _scrape_innings_loop(page2, api_responses2, max_innings)
-            page2.remove_listener("response", on_response2)
-            context2.close()
             return result
         except Exception as retry_err:
             raise Exception(f"Blocked by Akamai: {retry_err}")
+        finally:
+            if context2:
+                try:
+                    context2.close()
+                except Exception:
+                    pass
 
     result = _scrape_innings_loop(page, api_responses, max_innings)
     page.remove_listener("response", on_response)
@@ -892,11 +902,14 @@ def extract_match_metadata(page):
                     potm_player_name: (potm.player || {}).longName,
                 };
             } catch(e) {
-                return null;
+                return { __error: e.message };
             }
         }
     """
     )
+    if isinstance(raw, dict) and raw.get("__error"):
+        print(f"    Warning: match metadata extraction failed: {raw['__error']}", file=sys.stderr)
+        return None
     return raw
 
 
@@ -946,11 +959,14 @@ def extract_innings_data(page):
                 }
                 return rows;
             } catch(e) {
-                return [];
+                return { __error: e.message };
             }
         }
     """
     )
+    if isinstance(raw, dict) and raw.get("__error"):
+        print(f"    Warning: innings data extraction failed: {raw['__error']}", file=sys.stderr)
+        return []
     return raw if isinstance(raw, list) else []
 
 
@@ -1784,8 +1800,8 @@ def main():
             if series_since_recycle > RECYCLE_EVERY:
                 try:
                     context.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"  Warning: context.close() failed during recycling: {e}", file=sys.stderr)
                 context = browser.new_context(
                     viewport={"width": 1280, "height": 900},
                     locale="en-US",

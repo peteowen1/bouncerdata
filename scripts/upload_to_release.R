@@ -189,7 +189,8 @@ cli_h2("Upload Complete")
 uploaded_count <- length(parquet_files) - upload_failures
 cli_alert_success("Uploaded {uploaded_count}/{length(parquet_files)} files to {REPO}")
 if (upload_failures > 0L) {
-  cli_alert_warning("{upload_failures} upload(s) failed")
+  cli_alert_danger("{upload_failures}/{length(parquet_files)} upload(s) failed")
+  quit(save = "no", status = 1)
 }
 cli_alert_info("Release URL: https://github.com/{REPO}/releases/tag/{release_tag}")
 

@@ -568,8 +568,16 @@ def main():
             print(f"Rewrote {csv_path.name} with gender column")
 
     print()
+
+    # Signal failure if web discovery was attempted but found nothing
+    # (possible Akamai block affecting all pages)
+    if not args.skip_web and len(web_discovered) == 0 and not args.scan_parquets:
+        print("WARNING: Web discovery found zero series (possible Akamai block)", file=sys.stderr)
+        return -1
+
     return len(new_series)
 
 
 if __name__ == "__main__":
-    main()
+    result = main()
+    sys.exit(1 if result < 0 else 0)

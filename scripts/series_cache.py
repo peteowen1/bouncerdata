@@ -210,7 +210,7 @@ def _infer_gender_from_name(name):
 
 
 def merge_series(*sources):
-    """Merge multiple series dicts, preferring non-empty values from later sources.
+    """Merge multiple series dicts. Earlier sources take precedence; later sources fill gaps.
 
     Args:
         *sources: dicts keyed by series_id
