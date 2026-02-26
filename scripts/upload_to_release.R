@@ -3,6 +3,7 @@
 #
 # Supports multiple release types:
 #   - "core"          : Core data (matches, deliveries, players, team_elo)
+#   - "cricinfo"      : Cricinfo combined parquets (balls, match, innings)
 #   - "player_rating" : Player skill indices (all formats)
 #   - "team_rating"   : Team skill indices (all formats)
 #   - "venue_rating"  : Venue skill indices (all formats)
@@ -12,7 +13,7 @@
 # - Set GITHUB_PAT environment variable or use .github_pat file
 #
 # Usage:
-#   RELEASE_TYPE <- "core"  # or "player_rating", "team_rating", "venue_rating"
+#   RELEASE_TYPE <- "core"  # or "cricinfo", "player_rating", "team_rating", "venue_rating"
 #   source("scripts/upload_to_release.R")
 
 library(piggyback)
@@ -33,6 +34,13 @@ RELEASE_CONFIG <- list(
     dir = PARQUET_DIR,
     pattern = "^(matches|deliveries|players|team_elo|manifest)\\.(parquet|json)$",
     description = "Core cricket data updated daily: matches, deliveries, players, team_elo"
+  ),
+  "cricinfo" = list(
+    tag = "cricinfo",
+    name = "Cricinfo Data",
+    dir = "cricinfo/combined",
+    pattern = "^cricinfo_.*\\.parquet$",
+    description = "Cricinfo ball-by-ball (Hawkeye), match metadata, and innings scorecards for all formats"
   ),
   "player_rating" = list(
     tag = "player_rating",
