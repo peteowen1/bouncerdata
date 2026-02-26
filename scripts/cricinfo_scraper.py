@@ -28,6 +28,10 @@ Usage:
   # CI (uses Playwright's bundled Chromium, run under xvfb-run):
   xvfb-run --auto-servernum python cricinfo_rich_scraper.py --max-matches 50
 
+Chrome Process Cleanup:
+  On exit (normal, SIGINT, SIGTERM), the scraper kills its Chrome process tree
+  to prevent orphaned browser instances from accumulating.
+
   # Local Windows/Mac (uses system Chrome):
   python cricinfo_rich_scraper.py --system-chrome --series 1502138 --max-matches 5
 
@@ -41,6 +45,9 @@ import time
 import json
 import argparse
 import csv
+import signal
+import atexit
+import subprocess
 
 sys.stdout = io.TextIOWrapper(
     sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True
@@ -63,6 +70,118 @@ DEFAULT_OUTPUT = SCRIPT_DIR.parent / "cricinfo"
 DEFAULT_SERIES_LIST = SCRIPT_DIR / "series_list.csv"
 
 stealth = Stealth()
+
+# ============================================================
+# Chrome process cleanup — prevents orphaned browser instances
+# ============================================================
+# Global reference so signal/atexit handlers can close the browser
+_browser_ref = None
+_pidfile_path = None
+
+
+def _cleanup_browser():
+    """Kill the Playwright browser and remove PID file. Safe to call multiple times."""
+    global _browser_ref, _pidfile_path
+    browser = _browser_ref
+    _browser_ref = None  # Prevent re-entry
+
+    if browser is not None:
+        try:
+            browser.close()
+        except Exception:
+            pass
+        # Belt-and-suspenders: kill the Chrome process tree directly
+        try:
+            pid = browser.process.pid if hasattr(browser, 'process') and browser.process else None
+            if pid:
+                if sys.platform == "win32":
+                    # /F = force, /T = kill child process tree
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+    # Remove PID file
+    if _pidfile_path:
+        try:
+            Path(_pidfile_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+        _pidfile_path = None
+
+
+def _signal_handler(signum, frame):
+    """Handle SIGINT/SIGTERM by cleaning up browser then exiting."""
+    print(f"\nReceived signal {signum}, cleaning up browser...")
+    _cleanup_browser()
+    sys.exit(128 + signum)
+
+
+def _register_browser(browser, pidfile_dir=None):
+    """Register a browser for automatic cleanup on exit."""
+    global _browser_ref, _pidfile_path
+    _browser_ref = browser
+
+    # Write PID file so external tools can find and kill our Chrome
+    if pidfile_dir:
+        _pidfile_path = str(Path(pidfile_dir) / f".cricinfo_scraper_{os.getpid()}.pid")
+        try:
+            chrome_pid = browser.process.pid if hasattr(browser, 'process') and browser.process else "unknown"
+            with open(_pidfile_path, "w") as f:
+                f.write(f"python_pid={os.getpid()}\nchrome_pid={chrome_pid}\n")
+        except Exception:
+            pass
+
+    # Register cleanup handlers
+    atexit.register(_cleanup_browser)
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+# Page health check timeout (ms) — if a page.evaluate takes longer than this,
+# the page is likely crashed ("Aw, Snap!") or hung.
+PAGE_HEALTH_TIMEOUT_MS = 5000
+
+
+def _page_is_alive(page):
+    """Quick check if the page is responsive (not crashed/hung)."""
+    try:
+        page.wait_for_function("() => true", timeout=PAGE_HEALTH_TIMEOUT_MS)
+        return True
+    except Exception:
+        return False
+
+
+def _recover_page(page, url=None):
+    """Attempt to recover a crashed/hung page via reload.
+
+    Returns True if recovery succeeded, False otherwise.
+    """
+    try:
+        print("      Page unresponsive, attempting reload...")
+        page.reload(wait_until="domcontentloaded", timeout=30000)
+        time.sleep(2)
+        if _page_is_alive(page):
+            print("      Page recovered after reload")
+            return True
+    except Exception as e:
+        print(f"      Reload failed: {e}")
+    # Last resort: navigate to the URL directly
+    if url:
+        try:
+            print("      Trying direct navigation...")
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2)
+            if _page_is_alive(page):
+                print("      Page recovered after navigation")
+                return True
+        except Exception as e2:
+            print(f"      Direct navigation failed: {e2}")
+    return False
+
 
 ERROR_LOG_COLUMNS = [
     "timestamp", "match_id", "series_id", "series_name", "format",
@@ -224,6 +343,12 @@ def discover_matches(page, series_id, series_url=None, series_name=None,
             page.goto(attempt_url, wait_until="domcontentloaded", timeout=30000)
             time.sleep(1.5)
 
+            # Recover if page crashed during navigation
+            if not _page_is_alive(page):
+                if not _recover_page(page, attempt_url):
+                    continue
+                time.sleep(1.5)
+
             nd_text = page.evaluate(
                 """
                 () => {
@@ -368,16 +493,24 @@ def scrape_match_commentary(browser, context, page, match_url, max_innings=2):
 
     page.on("response", on_response)
 
+    full_url = match_url + "/ball-by-ball-commentary"
     try:
-        page.goto(
-            match_url + "/ball-by-ball-commentary",
-            wait_until="domcontentloaded",
-            timeout=30000,
-        )
+        page.goto(full_url, wait_until="domcontentloaded", timeout=30000)
         time.sleep(1.5)
     except Exception as e:
-        page.remove_listener("response", on_response)
-        raise e
+        # Page may have crashed — try recovery before giving up
+        if _recover_page(page, full_url):
+            time.sleep(1.5)
+        else:
+            page.remove_listener("response", on_response)
+            raise e
+
+    # Check page is alive before reading title (crash screen has no useful title)
+    if not _page_is_alive(page):
+        if not _recover_page(page, full_url):
+            page.remove_listener("response", on_response)
+            raise Exception("Page crashed and could not be recovered")
+        time.sleep(1.5)
 
     title = page.title()
     if "access denied" in title.lower():
@@ -560,12 +693,21 @@ def _scrape_innings_loop(page, api_responses, max_innings):
         max_scrolls = 200
 
         for i in range(max_scrolls):
-            if i % 2 == 0:
-                page.keyboard.press("End")
-            else:
-                page.keyboard.press("Home")
-                time.sleep(0.1)
-                page.keyboard.press("End")
+            try:
+                if i % 2 == 0:
+                    page.keyboard.press("End")
+                else:
+                    page.keyboard.press("Home")
+                    time.sleep(0.1)
+                    page.keyboard.press("End")
+            except Exception:
+                # Page likely crashed — attempt recovery
+                if _recover_page(page):
+                    stale_rounds += 1  # Count as stale, pagination state is lost
+                    continue
+                else:
+                    print("      Page unrecoverable, aborting innings")
+                    break
 
             time.sleep(0.7)
 
@@ -860,23 +1002,34 @@ def _extract_scorecard(page):
 
 
 def _dismiss_overlays(page):
-    """Remove marketing overlays (CleverTap, cookie banners) that block clicks."""
+    """Remove marketing overlays (CleverTap, cookie banners, ads) that block clicks."""
     page.evaluate(
         """
         () => {
+            // CleverTap overlays
             const overlays = document.querySelectorAll('.wzrk-overlay, #wzrk_wrapper, [class*="wzrk"]');
             for (const el of overlays) el.remove();
+            // Cookie/consent banners
             const banners = document.querySelectorAll('[class*="cookie"], [class*="consent"], [id*="cookie"]');
             for (const el of banners) el.style.display = 'none';
+            // Google DFP/GPT ad iframes and containers
+            const ads = document.querySelectorAll(
+                'iframe[id^="google_ads"], iframe[src*="doubleclick"], ' +
+                '[id^="div-gpt-ad"], [class*="ad-slot"], [class*="ad-container"], ' +
+                '[data-ad-slot], [class*="sticky-ad"], [class*="adhesion"], ' +
+                '[class*="billboard"], [id*="adhesion"]'
+            );
+            for (const el of ads) el.style.display = 'none';
         }
     """
     )
 
 
-def _find_innings_button(page):
-    """Find the innings/team filter button.
+def _find_and_click_innings_button(page):
+    """Find the innings/team filter button and click it via JS (avoids ad misclicks).
     T20I/ODI pages have a short team abbrev button (e.g. 'PAK').
-    Test pages have a full innings label (e.g. 'AUS 2nd Innings')."""
+    Test pages have a full innings label (e.g. 'AUS 2nd Innings').
+    Returns button info dict with text/style, or None if not found."""
     return page.evaluate(
         """
         () => {
@@ -886,7 +1039,8 @@ def _find_innings_button(page):
                 if (text.includes('Innings')) {
                     const rect = btn.getBoundingClientRect();
                     if (rect.height > 10 && rect.width > 30) {
-                        return { text, x: rect.x + rect.width/2, y: rect.y + rect.height/2, style: 'test' };
+                        btn.click();
+                        return { text, style: 'test' };
                     }
                 }
             }
@@ -895,7 +1049,8 @@ def _find_innings_button(page):
                 if (/^[A-Z][A-Z0-9-]{1,7}$/.test(text)) {
                     const rect = btn.getBoundingClientRect();
                     if (rect.height > 15 && rect.width > 30) {
-                        return { text, x: rect.x + rect.width/2, y: rect.y + rect.height/2, style: 'limited' };
+                        btn.click();
+                        return { text, style: 'limited' };
                     }
                 }
             }
@@ -912,11 +1067,10 @@ def _discover_innings(page):
         page.evaluate("window.scrollTo(0, 500)")
         time.sleep(0.5)
 
-        btn_info = _find_innings_button(page)
+        btn_info = _find_and_click_innings_button(page)
         if not btn_info:
             return []
 
-        page.mouse.click(btn_info["x"], btn_info["y"])
         time.sleep(1.0)
 
         tippy = page.locator(".tippy-box")
@@ -963,14 +1117,13 @@ def _switch_to_innings(page, target_title):
         page.evaluate("window.scrollTo(0, 500)")
         time.sleep(0.5)
 
-        btn_info = _find_innings_button(page)
+        btn_info = _find_and_click_innings_button(page)
         if not btn_info:
             if attempt < 2:
                 time.sleep(1)
                 continue
             raise Exception("Could not find innings dropdown button")
 
-        page.mouse.click(btn_info["x"], btn_info["y"])
         time.sleep(1.0)
 
         tippy = page.locator(".tippy-box")
@@ -980,9 +1133,8 @@ def _switch_to_innings(page, target_title):
                 time.sleep(0.3)
                 page.evaluate("window.scrollTo(0, 400)")
                 time.sleep(0.5)
-                btn_info2 = _find_innings_button(page)
+                btn_info2 = _find_and_click_innings_button(page)
                 if btn_info2:
-                    page.mouse.click(btn_info2["x"], btn_info2["y"])
                     time.sleep(1.0)
                     if page.locator(".tippy-box").count():
                         tippy = page.locator(".tippy-box")
@@ -1133,10 +1285,10 @@ FIXTURE_COLUMNS = [
 ]
 
 
-def _load_known_series(output_dir):
+def _load_known_series(output_dir, fixtures_file=None):
     """Load set of series_ids already present in fixtures.parquet."""
     import pyarrow.parquet as pq
-    outpath = Path(output_dir) / "fixtures.parquet"
+    outpath = Path(fixtures_file) if fixtures_file else Path(output_dir) / "fixtures.parquet"
     if not outpath.exists():
         return set()
     try:
@@ -1158,7 +1310,7 @@ def _get_scraped_match_ids(output_dir):
     return scraped
 
 
-def load_unscraped_fixtures(output_dir, format_filter=None):
+def load_unscraped_fixtures(output_dir, format_filter=None, fixtures_file=None):
     """Load completed fixtures that need ball-by-ball scraping.
 
     Reads fixtures.parquet, filters for completed matches without ball-by-ball
@@ -1168,7 +1320,7 @@ def load_unscraped_fixtures(output_dir, format_filter=None):
     """
     import pyarrow.parquet as pq
 
-    outpath = Path(output_dir) / "fixtures.parquet"
+    outpath = Path(fixtures_file) if fixtures_file else Path(output_dir) / "fixtures.parquet"
     if not outpath.exists():
         return {}
 
@@ -1216,7 +1368,7 @@ def load_unscraped_fixtures(output_dir, format_filter=None):
     return series_matches
 
 
-def save_fixtures(all_fixtures, output_dir):
+def save_fixtures(all_fixtures, output_dir, fixtures_file=None):
     """Save/update fixtures.parquet with all discovered matches.
 
     Merges new fixtures with any existing file, deduplicating by match_id
@@ -1225,7 +1377,7 @@ def save_fixtures(all_fixtures, output_dir):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    outpath = Path(output_dir) / "fixtures.parquet"
+    outpath = Path(fixtures_file) if fixtures_file else Path(output_dir) / "fixtures.parquet"
 
     # Normalize fixtures to consistent schema
     normalized = []
@@ -1286,12 +1438,12 @@ def save_fixtures(all_fixtures, output_dir):
         return None
 
 
-def mark_fixtures_scraped(output_dir, match_ids):
+def mark_fixtures_scraped(output_dir, match_ids, fixtures_file=None):
     """Update has_ball_by_ball=True for scraped match IDs in fixtures.parquet."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    outpath = Path(output_dir) / "fixtures.parquet"
+    outpath = Path(fixtures_file) if fixtures_file else Path(output_dir) / "fixtures.parquet"
     if not outpath.exists() or not match_ids:
         return
 
@@ -1374,6 +1526,11 @@ def main():
         help="Re-scrape matches even if output files already exist",
     )
     parser.add_argument(
+        "--skip-metadata-only",
+        action="store_true",
+        help="Skip matches that have _match.parquet but no _balls.parquet (already visited, no ball data)",
+    )
+    parser.add_argument(
         "--skip-known",
         action="store_true",
         help="Skip series already present in fixtures.parquet",
@@ -1396,17 +1553,27 @@ def main():
              "Only visits series that have completed matches without ball-by-ball data, "
              "skipping everything else. Run --fixtures-only first to populate the table.",
     )
+    parser.add_argument(
+        "--fixtures-file",
+        type=str,
+        default=None,
+        help="Custom path to fixtures parquet file (default: {output_dir}/fixtures.parquet). "
+             "Useful for running parallel scrapers per format without write conflicts.",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     series_list_path = Path(args.series_list)
+    fixtures_file = args.fixtures_file
 
     target_match_ids = None  # Set by --from-fixtures to filter within series
 
     # Determine which series to scrape
     if args.from_fixtures:
         # Smart mode: only visit series with unscraped completed matches
-        unscraped = load_unscraped_fixtures(output_dir, format_filter=args.format)
+        unscraped = load_unscraped_fixtures(
+            output_dir, format_filter=args.format, fixtures_file=fixtures_file
+        )
         if not unscraped:
             print("No unscraped fixtures found in fixtures.parquet")
             print("Run with --fixtures-only first to populate the fixtures table")
@@ -1528,6 +1695,7 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_opts)
+        _register_browser(browser, pidfile_dir=str(output_dir))
         context = browser.new_context(
             viewport={"width": 1280, "height": 900},
             locale="en-US",
@@ -1576,7 +1744,7 @@ def main():
                 # Batch save every 50 series (reduces I/O overhead)
                 if (i + 1) % 50 == 0:
                     if pending_fixtures:
-                        save_fixtures(pending_fixtures, output_dir)
+                        save_fixtures(pending_fixtures, output_dir, fixtures_file=fixtures_file)
                         pending_fixtures = []
                     elapsed = time.time() - start_time
                     rate = (i + 1) / elapsed
@@ -1586,7 +1754,7 @@ def main():
 
             # Final save for any remaining
             if pending_fixtures:
-                save_fixtures(pending_fixtures, output_dir)
+                save_fixtures(pending_fixtures, output_dir, fixtures_file=fixtures_file)
 
             elapsed = time.time() - start_time
             print(f"\n{'='*60}")
@@ -1595,14 +1763,31 @@ def main():
             print(f"{'='*60}")
 
             context.close()
-            browser.close()
+            _cleanup_browser()
             return
 
         total_matches = 0
         total_balls = 0
         total_rich = 0
+        series_since_recycle = 0
+        RECYCLE_EVERY = 20  # Recycle browser context every N series to free RAM
 
         for series_info in target_series:
+            # Periodically recycle context to prevent Chrome memory bloat
+            series_since_recycle += 1
+            if series_since_recycle > RECYCLE_EVERY:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                context = browser.new_context(
+                    viewport={"width": 1280, "height": 900},
+                    locale="en-US",
+                )
+                stealth.apply_stealth_sync(context)
+                page = context.new_page()
+                series_since_recycle = 0
+
             series_id = series_info["series_id"]
             fmt = series_info.get("format", "t20i")
             gender = series_info.get("gender", "male")
@@ -1626,7 +1811,7 @@ def main():
                 all_fixtures.extend(series_fixtures)
                 upcoming_count = sum(1 for f in series_fixtures if f["status"] not in ("FINISHED", "POST"))
                 print(f"  Fixtures: {len(series_fixtures)} total ({upcoming_count} upcoming)")
-                save_fixtures(series_fixtures, output_dir)
+                save_fixtures(series_fixtures, output_dir, fixtures_file=fixtures_file)
 
             # In --from-fixtures mode, only scrape the specific target matches
             if target_match_ids and series_id in target_match_ids:
@@ -1649,14 +1834,21 @@ def main():
                 # Skip if already scraped in ANY format dir (unless --force)
                 if not args.force:
                     already_scraped = False
+                    has_metadata = False
                     for check_fmt in ["t20i_male", "t20i_female", "odi_male", "odi_female", "test_male", "test_female"]:
                         check_dir = output_dir / check_fmt
-                        if check_dir.exists() and list(check_dir.glob(f"{match_id}_balls.*")):
-                            already_scraped = True
-                            break
+                        if check_dir.exists():
+                            if list(check_dir.glob(f"{match_id}_balls.*")):
+                                already_scraped = True
+                                break
+                            if list(check_dir.glob(f"{match_id}_match.*")):
+                                has_metadata = True
                     if already_scraped:
                         print(f"    Already scraped, skipping")
                         scraped_match_ids.append(match_id)  # Already has ball-by-ball
+                        continue
+                    if has_metadata and args.skip_metadata_only:
+                        print(f"    Metadata only (no balls), skipping")
                         continue
 
                 match_url = f"https://www.espncricinfo.com/series/{match['series_slug']}/{match['slug']}-{match_id}"
@@ -1745,14 +1937,15 @@ def main():
 
                 time.sleep(1)
 
-        browser.close()
+        _cleanup_browser()
 
     # Mark scraped matches in fixtures + print summary
     if scraped_match_ids:
-        mark_fixtures_scraped(output_dir, scraped_match_ids)
+        mark_fixtures_scraped(output_dir, scraped_match_ids, fixtures_file=fixtures_file)
     if all_fixtures:
         fixture_upcoming = sum(1 for f in all_fixtures if f["status"] not in ("FINISHED", "POST"))
-        print(f"\nFixtures: {len(all_fixtures)} total ({fixture_upcoming} upcoming) saved incrementally to {output_dir}/fixtures.parquet")
+        fx_path = fixtures_file or f"{output_dir}/fixtures.parquet"
+        print(f"\nFixtures: {len(all_fixtures)} total ({fixture_upcoming} upcoming) saved incrementally to {fx_path}")
 
     print(f"\n{'='*60}")
     print(f"DONE: {total_matches} matches, {total_balls} balls, {total_rich} rich")
