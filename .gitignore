@@ -44,8 +44,14 @@ fox_discovered_*.rds
 
 # Log files and temp artifacts
 *.log
+*_log.txt
+*_log*.txt
 temp_*/
 *.duckdb.wal.backup
+
+# One-off series discovery outputs
+scripts/series_list_*.csv
+!scripts/series_list.csv
 
 # Python
 __pycache__/
