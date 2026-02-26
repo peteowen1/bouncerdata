@@ -49,5 +49,5 @@ jobs:
         run: |
           npm install -g wrangler
           for f in blog/*.parquet; do
-            wrangler r2 object put "inthegame-data/$(basename $f)" --file "$f"
+            wrangler r2 object put "inthegame-data/$(basename $f)" --file "$f" --remote
           done
