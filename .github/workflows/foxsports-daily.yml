@@ -275,6 +275,9 @@ jobs:
           results <- list()
           total_matches <- 0
           total_balls <- 0
+          fetch_errors <- 0L
+          discovery_errors <- 0L
+          upload_failures <- 0L
 
           output_file <- Sys.getenv("GITHUB_OUTPUT")
 
@@ -288,6 +291,7 @@ jobs:
             cache_file <- paste0("fox_discovered_", tolower(format), "_matches.rds")
 
             cli::cli_alert_info("Discovering {format} matches...")
+            discovery_failed <- FALSE
             match_ids <- tryCatch({
               bouncer:::fox_discover_matches(
                 browser = browser,
@@ -300,9 +304,14 @@ jobs:
                 verbose = TRUE
               )
             }, error = function(e) {
-              cli::cli_alert_warning("Discovery failed for {format}: {e$message}")
+              cli::cli_alert_danger("Discovery FAILED for {format}: {e$message}")
+              discovery_failed <<- TRUE
               character(0)
             })
+
+            if (discovery_failed) {
+              discovery_errors <- discovery_errors + 1L
+            }
 
             if (length(match_ids) == 0) {
               cli::cli_alert_warning("No {format} matches found")
@@ -313,6 +322,7 @@ jobs:
 
             # Fetch matches with conservative delays
             cli::cli_alert_info("Fetching {format} match data...")
+            fetch_failed <- FALSE
             fetch_result <- tryCatch({
               bouncer:::fox_fetch_matches(
                 browser = browser,
@@ -329,7 +339,8 @@ jobs:
                 max_consecutive_failures = 5
               )
             }, error = function(e) {
-              cli::cli_alert_warning("Fetch failed for {format}: {e$message}")
+              cli::cli_alert_danger("Fetch FAILED for {format}: {e$message}")
+              fetch_failed <<- TRUE
               NULL
             })
 
@@ -363,20 +374,30 @@ jobs:
               Sys.sleep(5)
               new_key <- tryCatch({
                 bouncer:::fox_get_userkey(browser, match_ids[1], timeout_sec = 60)
-              }, error = function(e) NULL)
+              }, error = function(e) {
+                cli::cli_alert_warning("Userkey refresh failed: {e$message}")
+                NULL
+              })
               if (!is.null(new_key)) {
                 userkey <- new_key
                 cli::cli_alert_success("Userkey refreshed")
+              } else {
+                cli::cli_alert_warning("Continuing with existing userkey")
               }
 
               Sys.sleep(10)  # Extra delay between formats
+            } else if (fetch_failed) {
+              fetch_errors <- fetch_errors + 1L
+              cli::cli_alert_danger("Skipping {format} combine/upload due to fetch error")
             } else {
               cli::cli_alert_info("No new {format} data, skipping combine/upload")
             }
           }
 
           # Close browser
-          tryCatch(browser$close(), error = function(e) NULL)
+          tryCatch(browser$close(), error = function(e) {
+            cli::cli_alert_warning("Browser close failed: {e$message}")
+          })
 
           # Generate manifest
           cli::cli_h2("Generating manifest")
@@ -396,7 +417,14 @@ jobs:
               tag = "foxsports",
               name = "Fox Sports Cricket Data"
             ),
-            error = function(e) cli::cli_alert_info("Release already exists")
+            error = function(e) {
+              if (grepl("already exists", e$message, ignore.case = TRUE)) {
+                cli::cli_alert_info("Release already exists")
+              } else {
+                cli::cli_alert_danger("Failed to create release: {e$message}")
+                stop(e)
+              }
+            }
           )
 
           # Upload combined files for each format
@@ -405,11 +433,18 @@ jobs:
 
             combined_files <- list.files(format_dir, pattern = "^all_.*\\.parquet$", full.names = TRUE)
             for (f in combined_files) {
+              fsize <- file.info(f)$size
+              if (is.na(fsize) || fsize == 0) {
+                cli::cli_alert_warning("Skipping empty file: {basename(f)}")
+                upload_failures <- upload_failures + 1L
+                next
+              }
               tryCatch({
                 piggyback::pb_upload(f, repo = "peteowen1/bouncerdata", tag = "foxsports", overwrite = TRUE)
-                cli::cli_alert_success("Uploaded {basename(f)}")
+                cli::cli_alert_success("Uploaded {basename(f)} ({round(fsize / 1024)}KB)")
               }, error = function(e) {
-                cli::cli_alert_warning("Failed to upload {basename(f)}: {e$message}")
+                cli::cli_alert_danger("Failed to upload {basename(f)}: {e$message}")
+                upload_failures <<- upload_failures + 1L
               })
             }
           }
@@ -427,6 +462,15 @@ jobs:
             cli::cli_alert_warning("Failed to upload manifest: {e$message}")
           })
 
+          # Check for errors before reporting success
+          has_errors <- (fetch_errors > 0) || (discovery_errors > 0) || (upload_failures > 0)
+          if (has_errors) {
+            cli::cli_h2("Error Summary")
+            if (fetch_errors > 0) cli::cli_alert_danger("{fetch_errors} format(s) failed during fetch")
+            if (discovery_errors > 0) cli::cli_alert_warning("{discovery_errors} format(s) had discovery errors")
+            if (upload_failures > 0) cli::cli_alert_danger("{upload_failures} file(s) failed to upload")
+          }
+
           # Output summary
           cat(sprintf("total_matches=%d\n", total_matches), file = output_file, append = TRUE)
           cat(sprintf("total_balls=%d\n", total_balls), file = output_file, append = TRUE)
@@ -434,6 +478,12 @@ jobs:
 
           cli::cli_h1("Scrape Complete!")
           cli::cli_alert_success("Total: {total_matches} matches, {total_balls} balls")
+
+          # Fail the step if critical errors occurred
+          if (fetch_errors > 0 || upload_failures > 0) {
+            stop(sprintf("Step had %d fetch error(s) and %d upload failure(s) - see logs above",
+                         fetch_errors, upload_failures))
+          }
         shell: Rscript {0}
         env:
           GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}

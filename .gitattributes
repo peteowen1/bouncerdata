@@ -1,0 +1,6 @@
+# Ensure consistent line endings
+*.csv text eol=lf
+*.py text eol=lf
+*.R text eol=lf
+*.yml text eol=lf
+*.sh text eol=lf
