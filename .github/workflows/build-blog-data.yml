@@ -48,6 +48,12 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           npm install -g wrangler
-          for f in blog/*.parquet; do
-            wrangler r2 object put "inthegame-data/$(basename $f)" --file "$f" --remote
+          shopt -s nullglob
+          files=(blog/*.parquet)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No parquet files found in blog/ — skipping upload"
+            exit 0
+          fi
+          for f in "${files[@]}"; do
+            wrangler r2 object put "inthegame-data/$(basename "$f")" --file "$f" --remote
           done
