@@ -5,9 +5,6 @@ library(httr2)
 library(jsonlite)
 library(cli)
 
-# Null coalescing operator
-`%||%` <- function(x, y) if (is.null(x)) y else x
-
 # Configuration
 CRICSHEET_URL <- "https://cricsheet.org/downloads/all_json.zip"
 CACHE_FILE <- "manifests/etag_cache.json"

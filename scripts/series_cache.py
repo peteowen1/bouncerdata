@@ -19,7 +19,6 @@ Usage:
 """
 
 import csv
-import re
 import sys
 from pathlib import Path
 
@@ -36,6 +35,73 @@ FORMAT_DIR_MAP = {
     "odi": "odi",
     "test": "test",
 }
+
+# ============================================================
+# Canonical format/gender detection — imported by all scripts
+# ============================================================
+
+# internationalClassId → normalized format
+CLASS_ID_MAP = {1: "test", 2: "odi", 3: "t20i"}
+
+# Format string variants → normalized (superset of all sources)
+FORMAT_STRING_MAP = {
+    "TEST": "test", "ODI": "odi", "T20I": "t20i", "T20": "t20i",
+    "MDM": "test", "ODM": "odi", "IT20": "t20i",
+}
+
+# Keywords that indicate a female series/match (superset of all sources)
+FEMALE_KEYWORDS = (
+    "women", "female", "wbbl", "wpl", "wodi", "wt20",
+    "women's", "w t20", "w odi",
+)
+
+
+def normalize_format(fmt_str=None, class_id=None):
+    """Normalize format strings and class IDs to t20i/odi/test.
+
+    This is the canonical format detection function — all scripts should
+    use this instead of maintaining their own mappings.
+
+    Args:
+        fmt_str: Format string (e.g. "T20I", "TEST", "MDM")
+        class_id: ESPN internationalClassId (1=test, 2=odi, 3=t20i)
+
+    Returns:
+        Normalized format string ("t20i", "odi", "test") or None.
+    """
+    if class_id and class_id in CLASS_ID_MAP:
+        return CLASS_ID_MAP[class_id]
+    if not fmt_str:
+        return None
+    return FORMAT_STRING_MAP.get(str(fmt_str).upper())
+
+
+def infer_gender(name="", slug="", gender_field=""):
+    """Infer gender from available metadata.
+
+    This is the canonical gender detection function — all scripts should
+    use this instead of maintaining their own keyword lists.
+
+    Args:
+        name: Series or match name (e.g. "Women's T20 World Cup")
+        slug: URL slug (e.g. "women-s-t20-world-cup")
+        gender_field: Direct gender value from API (e.g. "male", "female")
+
+    Returns:
+        "male" or "female".
+    """
+    # Direct field is most reliable
+    if gender_field:
+        g = gender_field.lower()
+        if g in ("male", "female"):
+            return g
+
+    # Check name and slug for female keywords
+    search_text = (name + " " + slug).lower()
+    if any(kw in search_text for kw in FEMALE_KEYWORDS):
+        return "female"
+
+    return "male"
 
 
 # ============================================================
@@ -127,18 +193,11 @@ def _col_val(table, col_name, row_idx):
 
 
 def _normalize_format(fmt_str, class_id=None):
-    """Normalize format strings and class IDs to t20i/odi/test."""
-    CLASS_ID_MAP = {1: "test", 2: "odi", 3: "t20i"}
-    if class_id and class_id in CLASS_ID_MAP:
-        return CLASS_ID_MAP[class_id]
-    if not fmt_str:
-        return None
-    fmt_upper = str(fmt_str).upper()
-    FORMAT_MAP = {
-        "TEST": "test", "ODI": "odi", "T20I": "t20i", "T20": "t20i",
-        "MDM": "test", "ODM": "odi", "IT20": "t20i",
-    }
-    return FORMAT_MAP.get(fmt_upper)
+    """Normalize format strings and class IDs to t20i/odi/test.
+
+    Delegates to the canonical normalize_format() function.
+    """
+    return normalize_format(fmt_str=fmt_str, class_id=class_id)
 
 
 def _season_from_date(date_str):
@@ -198,15 +257,11 @@ def load_csv_cache(csv_path):
 
 
 def _infer_gender_from_name(name):
-    """Infer gender from series name using keyword heuristics."""
-    if not name:
-        return "male"
-    lower = name.lower()
-    female_keywords = ("women", "female", "wbbl", "wpl", "wodi", "wt20",
-                       "women's", "w t20", "w odi")
-    if any(kw in lower for kw in female_keywords):
-        return "female"
-    return "male"
+    """Infer gender from series name using keyword heuristics.
+
+    Delegates to the canonical infer_gender() function.
+    """
+    return infer_gender(name=name)
 
 
 def merge_series(*sources):

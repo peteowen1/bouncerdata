@@ -6,9 +6,6 @@ library(jsonlite)
 library(zip)
 library(cli)
 
-# Null coalescing operator
-`%||%` <- function(x, y) if (is.null(x)) y else x
-
 # Configuration
 CRICSHEET_URL <- "https://cricsheet.org/downloads/all_json.zip"
 TEMP_DIR <- "json_temp"

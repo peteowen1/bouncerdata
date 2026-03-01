@@ -67,6 +67,27 @@ def main():
                         print(f"Killed scraper Python process {pid}")
         except Exception as e:
             print(f"  Warning scanning processes: {e}")
+    else:
+        # Linux/Mac: use pgrep to find scraper Python processes
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "cricinfo_scraper"],
+                capture_output=True, text=True, timeout=10,
+            )
+            for line in result.stdout.strip().split("\n"):
+                line = line.strip()
+                if line.isdigit():
+                    pid = int(line)
+                    if pid not in killed_pids and pid != os.getpid():
+                        try:
+                            os.kill(pid, 9)
+                            print(f"Killed scraper Python process {pid}")
+                        except ProcessLookupError:
+                            pass
+        except FileNotFoundError:
+            pass  # pgrep not available
+        except Exception as e:
+            print(f"  Warning scanning processes: {e}")
 
     # 3. Kill orphaned Playwright Chrome (identified by --disable-blink-features)
     if sys.platform == "win32":
@@ -88,6 +109,27 @@ def main():
                 print(f"Killed {len(chrome_pids)} Playwright Chrome processes")
             else:
                 print("No orphaned Playwright Chrome processes found")
+        except Exception as e:
+            print(f"  Warning scanning Chrome: {e}")
+    else:
+        # Linux/Mac: use pgrep to find Playwright Chrome processes
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "disable-blink-features"],
+                capture_output=True, text=True, timeout=15,
+            )
+            chrome_pids = [int(l.strip()) for l in result.stdout.strip().split("\n") if l.strip().isdigit()]
+            for pid in chrome_pids:
+                try:
+                    os.kill(pid, 9)
+                except ProcessLookupError:
+                    pass
+            if chrome_pids:
+                print(f"Killed {len(chrome_pids)} Playwright Chrome processes")
+            else:
+                print("No orphaned Playwright Chrome processes found")
+        except FileNotFoundError:
+            pass  # pgrep not available
         except Exception as e:
             print(f"  Warning scanning Chrome: {e}")
 
