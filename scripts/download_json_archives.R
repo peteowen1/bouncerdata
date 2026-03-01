@@ -3,7 +3,6 @@
 
 library(httr2)
 library(jsonlite)
-library(zip)
 library(cli)
 
 # Configuration

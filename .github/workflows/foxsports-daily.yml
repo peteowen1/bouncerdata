@@ -35,7 +35,7 @@ on:
         type: boolean
 
 env:
-  R_VERSION: '4.3.2'
+  R_VERSION: 'release'
   GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
 permissions:
@@ -72,17 +72,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.R_LIBS_USER }}
-          key: ${{ runner.os }}-r-${{ env.R_VERSION }}-foxsports-${{ hashFiles('bouncer/DESCRIPTION') }}
+          key: ${{ runner.os }}-r-${{ env.R_VERSION }}-foxsports
           restore-keys: |
-            ${{ runner.os }}-r-${{ env.R_VERSION }}-foxsports-
-            ${{ runner.os }}-r-${{ env.R_VERSION }}-
+            ${{ runner.os }}-r-${{ env.R_VERSION }}-foxsports
 
       - name: Cache Fox Sports discovery files
         uses: actions/cache@v4
         with:
           path: |
             fox_discovered_*.rds
-          key: foxsports-discovery-${{ github.run_number }}
+          key: foxsports-discovery-${{ github.ref_name }}
           restore-keys: |
             foxsports-discovery-
 

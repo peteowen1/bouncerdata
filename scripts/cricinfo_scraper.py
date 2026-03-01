@@ -60,7 +60,10 @@ from playwright.sync_api import sync_playwright
 from playwright_stealth import Stealth
 from pathlib import Path
 
-from series_cache import build_series_list
+from series_cache import (
+    build_series_list, normalize_format, infer_gender,
+    CLASS_ID_MAP, FORMAT_STRING_MAP, FEMALE_KEYWORDS,
+)
 
 # ============================================================
 # Configuration — portable defaults relative to script location
@@ -203,21 +206,19 @@ def log_scrape_error(output_dir, **kwargs):
 
 
 def _detect_gender_from_series(series_obj, name=""):
-    """Detect gender from series __NEXT_DATA__ object or name."""
-    # Direct field (most reliable)
-    gender = series_obj.get("gender", "")
-    if gender and gender.lower() in ("male", "female"):
-        return gender.lower()
-    # Slug check
+    """Detect gender from series __NEXT_DATA__ object or name.
+
+    Uses the canonical infer_gender() from series_cache.
+    Returns 'male', 'female', or None if no strong signal.
+    """
+    gender_field = series_obj.get("gender", "")
     slug = series_obj.get("slug", "")
-    if "women" in slug.lower():
-        return "female"
-    # Name heuristic
-    if name:
-        lower = name.lower()
-        if any(kw in lower for kw in ("women", "female", "wbbl", "wpl", "wodi", "wt20")):
-            return "female"
-    return None
+    result = infer_gender(name=name, slug=slug, gender_field=gender_field)
+    # Return None instead of "male" when there's no positive signal,
+    # so callers can fall back to other sources
+    if not gender_field and not any(kw in (name + " " + slug).lower() for kw in FEMALE_KEYWORDS):
+        return None
+    return result
 
 
 def fetch_fixtures_fast(page, series_url, series_id, series_name="",
@@ -283,15 +284,14 @@ def fetch_fixtures_fast(page, series_url, series_id, series_name="",
         print(f"  Warning: fetch_fixtures_fast error for series: {error_detail}", file=sys.stderr)
         return []
 
-    # Detect gender from page data
+    # Detect gender from page data using canonical function
     page_name = result.get("seriesName", "")
     page_slug = result.get("seriesSlug", "")
     s_name = series_name or page_name
     s_gender = series_gender
     if not s_gender or s_gender == "male":
-        # Check page data for gender hints
-        combined = (page_name + " " + page_slug).lower()
-        if any(kw in combined for kw in ("women", "female", "wbbl", "wpl")):
+        detected = infer_gender(name=page_name, slug=page_slug)
+        if detected == "female":
             s_gender = "female"
     s_gender = s_gender or "male"
 
@@ -782,53 +782,43 @@ def _scrape_innings_loop(page, api_responses, max_innings):
             "innings_failures": innings_failures}
 
 
-FORMAT_MAP = {
-    # internationalClassId -> our directory name
-    1: "test",
-    2: "odi",
-    3: "t20i",
-    # match.format string -> our directory name
-    "TEST": "test",
-    "ODI": "odi",
-    "T20I": "t20i",
-    "T20": "t20i",
-    "MDM": "test",   # Multi-day match
-    "ODM": "odi",    # One-day match (domestic)
-    "IT20": "t20i",  # International T20
-}
-
-
 def _detect_format(initial_check):
     """Detect match format from __NEXT_DATA__ metadata.
-    Returns 't20i', 'odi', 'test', or None if undetectable."""
-    # Prefer internationalClassId (most reliable)
-    class_id = initial_check.get("internationalClassId")
-    if class_id and class_id in FORMAT_MAP:
-        return FORMAT_MAP[class_id]
-    # Fall back to match.format string
-    fmt_str = initial_check.get("matchFormat")
-    if fmt_str and fmt_str.upper() in FORMAT_MAP:
-        return FORMAT_MAP[fmt_str.upper()]
-    return None
+    Returns 't20i', 'odi', 'test', or None if undetectable.
+
+    Uses the canonical normalize_format() from series_cache.
+    """
+    return normalize_format(
+        fmt_str=initial_check.get("matchFormat"),
+        class_id=initial_check.get("internationalClassId"),
+    )
 
 
 def _detect_gender(initial_check):
     """Detect match gender from __NEXT_DATA__ metadata.
-    Returns 'male', 'female', or None if undetectable."""
-    # Direct gender field (most reliable)
-    gender = initial_check.get("gender")
-    if gender:
-        return gender.lower() if gender.lower() in ("male", "female") else None
-    # Heuristic: check team abbreviations for -W suffix (e.g. IND-W, AUS-W)
+    Returns 'male', 'female', or None if undetectable.
+
+    Uses the canonical infer_gender() from series_cache, with
+    team-abbreviation heuristic as an additional signal.
+    """
+    gender_field = initial_check.get("gender", "")
+    slug = initial_check.get("slug", "")
+
+    # Use canonical detection for direct field and slug/name
+    if gender_field:
+        g = gender_field.lower()
+        if g in ("male", "female"):
+            return g
+
+    # Team abbreviation heuristic (e.g. IND-W, AUS-W)
     teams = initial_check.get("teams", [])
     if teams and all(t.endswith("-W") for t in teams if t):
         return "female"
-    # Heuristic: check slug for "women" keyword
-    slug = initial_check.get("slug", "")
-    if "women" in slug.lower():
+
+    # Slug keyword check via canonical function
+    if slug and any(kw in slug.lower() for kw in FEMALE_KEYWORDS):
         return "female"
-    if teams:
-        return None  # Can't determine gender from team data alone
+
     return None
 
 
@@ -1486,13 +1476,11 @@ def mark_fixtures_scraped(output_dir, match_ids, fixtures_file=None):
 
 
 def _infer_gender(name):
-    """Infer gender from series name."""
-    if not name:
-        return "male"
-    lower = name.lower()
-    if any(kw in lower for kw in ("women", "female", "wbbl", "wpl", "wodi", "wt20", "women's")):
-        return "female"
-    return "male"
+    """Infer gender from series name.
+
+    Delegates to the canonical infer_gender() from series_cache.
+    """
+    return infer_gender(name=name)
 
 
 def load_series_list(series_list_path, format_filter=None, max_series=10):

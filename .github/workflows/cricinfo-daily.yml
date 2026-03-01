@@ -156,7 +156,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add scripts/series_list.csv
           git diff --cached --quiet || git commit -m "Auto-update series_list.csv with newly discovered series"
-          git push origin HEAD
+          git push origin HEAD:dev
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
