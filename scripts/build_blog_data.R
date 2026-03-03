@@ -6,6 +6,40 @@ dir.create("blog", showWarnings = FALSE)
 min_balls_batting  <- c(t20 = 100, odi = 300, test = 500)
 min_balls_bowling  <- c(t20 = 100, odi = 300, test = 500)
 
+# Load player metadata (cricsheet names + cricinfo enrichment)
+players_path <- "source/players.parquet"
+details_path <- "source/bouncer_player_details.parquet"
+
+if (file.exists(players_path)) {
+  players <- read_parquet(players_path) |>
+    select(player_id, player_name)
+  cat(sprintf("Loaded player registry: %d players\n", nrow(players)))
+} else {
+  warning("players.parquet not found — player names will be IDs")
+  players <- NULL
+}
+
+if (file.exists(details_path)) {
+  details <- read_parquet(details_path) |>
+    select(player_id, country, full_name, dob, batting_style, bowling_style)
+  cat(sprintf("Loaded player details: %d players (%d enriched)\n",
+              nrow(details), sum(!is.na(details$full_name))))
+} else {
+  warning("bouncer_player_details.parquet not found — no enrichment")
+  details <- NULL
+}
+
+# Build player metadata lookup (join players + details)
+if (!is.null(players)) {
+  player_meta <- players
+  if (!is.null(details)) {
+    player_meta <- player_meta |>
+      left_join(details, by = "player_id")
+  }
+} else {
+  player_meta <- NULL
+}
+
 for (fmt in c("t20", "odi", "test")) {
   cat(sprintf("Processing %s...\n", toupper(fmt)))
 
@@ -24,9 +58,20 @@ for (fmt in c("t20", "odi", "test")) {
     slice_max(batter_balls_faced, n = 1, with_ties = FALSE) |>
     ungroup() |>
     filter(batter_balls_faced >= min_balls_batting[fmt]) |>
-    select(player = batter_id, scoring_index = batter_scoring_index,
-           survival_rate = batter_survival_rate, balls_faced = batter_balls_faced) |>
-    arrange(desc(scoring_index))
+    select(player_id = batter_id, scoring_index = batter_scoring_index,
+           survival_rate = batter_survival_rate, balls_faced = batter_balls_faced)
+
+  if (!is.null(player_meta)) {
+    batting <- batting |>
+      left_join(player_meta, by = "player_id") |>
+      select(player = player_name, country, full_name, dob, batting_style,
+             scoring_index, survival_rate, balls_faced) |>
+      mutate(player = coalesce(player, batting$player_id))
+  } else {
+    batting <- batting |> rename(player = player_id)
+  }
+
+  batting <- batting |> arrange(desc(scoring_index))
   write_parquet(batting, sprintf("blog/%s_batting.parquet", fmt))
   cat(sprintf("  %s batting: %d players\n", fmt, nrow(batting)))
 
@@ -35,9 +80,20 @@ for (fmt in c("t20", "odi", "test")) {
     slice_max(bowler_balls_bowled, n = 1, with_ties = FALSE) |>
     ungroup() |>
     filter(bowler_balls_bowled >= min_balls_bowling[fmt]) |>
-    select(player = bowler_id, economy_index = bowler_economy_index,
-           strike_rate = bowler_strike_rate, balls_bowled = bowler_balls_bowled) |>
-    arrange(economy_index)
+    select(player_id = bowler_id, economy_index = bowler_economy_index,
+           strike_rate = bowler_strike_rate, balls_bowled = bowler_balls_bowled)
+
+  if (!is.null(player_meta)) {
+    bowling <- bowling |>
+      left_join(player_meta, by = "player_id") |>
+      select(player = player_name, country, full_name, dob, bowling_style,
+             economy_index, strike_rate, balls_bowled) |>
+      mutate(player = coalesce(player, bowling$player_id))
+  } else {
+    bowling <- bowling |> rename(player = player_id)
+  }
+
+  bowling <- bowling |> arrange(economy_index)
   write_parquet(bowling, sprintf("blog/%s_bowling.parquet", fmt))
   cat(sprintf("  %s bowling: %d players\n", fmt, nrow(bowling)))
 

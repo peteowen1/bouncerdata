@@ -36,6 +36,13 @@ jobs:
             gh release download venue_rating  -p "${fmt}_venue_skill.parquet"  -D source
           done
 
+      - name: Download player metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download cricsheet         -p "players.parquet"                  -D source || echo "players.parquet not available"
+          gh release download player_details   -p "bouncer_player_details.parquet"   -D source || echo "bouncer_player_details.parquet not available"
+
       - name: Aggregate
         run: Rscript scripts/build_blog_data.R
 
