@@ -798,27 +798,31 @@ def _detect_gender(initial_check):
     """Detect match gender from __NEXT_DATA__ metadata.
     Returns 'male', 'female', or None if undetectable.
 
-    Uses the canonical infer_gender() from series_cache, with
-    team-abbreviation heuristic as an additional signal.
+    Delegates to canonical infer_gender() from series_cache for field/slug
+    detection, with team-abbreviation heuristic (-W suffix) as an
+    additional signal before falling back.
     """
     gender_field = initial_check.get("gender", "")
     slug = initial_check.get("slug", "")
 
-    # Use canonical detection for direct field and slug/name
-    if gender_field:
-        g = gender_field.lower()
-        if g in ("male", "female"):
-            return g
+    # Canonical detection covers gender_field + slug keywords
+    result = infer_gender(slug=slug, gender_field=gender_field)
 
-    # Team abbreviation heuristic (e.g. IND-W, AUS-W)
+    # If canonical returned "female", trust it
+    if result == "female":
+        return result
+
+    # Team abbreviation heuristic (e.g. IND-W, AUS-W) — match-level signal
+    # not available at series level, so not in canonical function
     teams = initial_check.get("teams", [])
     if teams and all(t.endswith("-W") for t in teams if t):
         return "female"
 
-    # Slug keyword check via canonical function
-    if slug and any(kw in slug.lower() for kw in FEMALE_KEYWORDS):
-        return "female"
+    # If we had a direct gender_field, trust the canonical "male" result
+    if gender_field:
+        return result
 
+    # No strong signal — return None so callers can fall back
     return None
 
 

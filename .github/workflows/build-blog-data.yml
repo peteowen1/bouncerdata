@@ -37,11 +37,12 @@ jobs:
           done
 
       - name: Download player metadata
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download cricsheet         -p "players.parquet"                  -D source || echo "players.parquet not available"
-          gh release download player_details   -p "bouncer_player_details.parquet"   -D source || echo "bouncer_player_details.parquet not available"
+          gh release download cricsheet         -p "players.parquet"                  -D source
+          gh release download player_details   -p "bouncer_player_details.parquet"   -D source
 
       - name: Aggregate
         run: Rscript scripts/build_blog_data.R

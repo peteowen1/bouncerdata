@@ -17,6 +17,8 @@ DB_PATH <- "bouncer.duckdb"
 OUTPUT_DIR <- "parquet"
 
 #' Export a table to Parquet
+#' @param table_name Unqualified table name (main schema only).
+#'   For schema-qualified names, use DBI::Id(schema=, table=) instead.
 export_table <- function(con, table_name, output_path) {
   cli_alert_info("Exporting {basename(output_path)}...")
 

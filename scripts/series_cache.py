@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 # ============================================================
-# CSV field names (gender column is new, backwards-compatible)
+# CSV field names (gender column is optional for backwards-compatibility)
 # ============================================================
 CSV_FIELDS = ["series_id", "name", "url", "season", "format", "max_innings", "gender"]
 

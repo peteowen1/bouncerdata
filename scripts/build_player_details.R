@@ -8,7 +8,7 @@
 #   - Shared match_id (both cover same matches)
 #   - Same batting team within that match
 #   - Same surname (last token of player name)
-#   - Ranked by number of co-occurrences (3+ = high confidence)
+#   - Ranked by number of co-occurrences (2+ = confident match)
 #
 # Run locally or whenever new cricinfo data is ingested.
 
@@ -70,7 +70,7 @@ ci_meta <- dbGetQuery(con, "
   GROUP BY player_id
 ")
 
-# Step 3: Parse DOB from JSON-like string to ISO date
+# Step 3: Parse DOB from Python dict string (e.g. {'year': 1990, 'month': 3, 'date': 15}) to ISO date
 parse_dob <- function(x) {
   if (is.na(x) || x == "" || !grepl("year", x)) return(NA_character_)
   year <- as.integer(sub(".*'year':\\s*(\\d+).*", "\\1", x))
@@ -80,6 +80,11 @@ parse_dob <- function(x) {
   sprintf("%04d-%02d-%02d", year, month, day)
 }
 ci_meta$dob <- sapply(ci_meta$dob_raw, parse_dob, USE.NAMES = FALSE)
+n_raw <- sum(!is.na(ci_meta$dob_raw) & ci_meta$dob_raw != "")
+n_parsed <- sum(!is.na(ci_meta$dob))
+if (n_raw > 0 && n_parsed < n_raw * 0.5) {
+  warning(sprintf("DOB parsing: only %d/%d parsed — format may have changed", n_parsed, n_raw))
+}
 ci_meta$dob_raw <- NULL
 
 # Step 4: Get all cricsheet players

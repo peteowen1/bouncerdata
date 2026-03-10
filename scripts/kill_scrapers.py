@@ -85,7 +85,7 @@ def main():
                         except ProcessLookupError:
                             pass
         except FileNotFoundError:
-            pass  # pgrep not available
+            print("  Note: pgrep not available, skipping process scan")
         except Exception as e:
             print(f"  Warning scanning processes: {e}")
 
@@ -129,7 +129,7 @@ def main():
             else:
                 print("No orphaned Playwright Chrome processes found")
         except FileNotFoundError:
-            pass  # pgrep not available
+            print("  Note: pgrep not available, skipping process scan")
         except Exception as e:
             print(f"  Warning scanning Chrome: {e}")
 

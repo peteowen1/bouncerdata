@@ -64,9 +64,9 @@ for (fmt in c("t20", "odi", "test")) {
   if (!is.null(player_meta)) {
     batting <- batting |>
       left_join(player_meta, by = "player_id") |>
+      mutate(player_name = coalesce(player_name, player_id)) |>
       select(player = player_name, country, full_name, dob, batting_style,
-             scoring_index, survival_rate, balls_faced) |>
-      mutate(player = coalesce(player, batting$player_id))
+             scoring_index, survival_rate, balls_faced)
   } else {
     batting <- batting |> rename(player = player_id)
   }
@@ -86,9 +86,9 @@ for (fmt in c("t20", "odi", "test")) {
   if (!is.null(player_meta)) {
     bowling <- bowling |>
       left_join(player_meta, by = "player_id") |>
+      mutate(player_name = coalesce(player_name, player_id)) |>
       select(player = player_name, country, full_name, dob, bowling_style,
-             economy_index, strike_rate, balls_bowled) |>
-      mutate(player = coalesce(player, bowling$player_id))
+             economy_index, strike_rate, balls_bowled)
   } else {
     bowling <- bowling |> rename(player = player_id)
   }
