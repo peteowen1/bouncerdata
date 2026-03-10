@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   build:
@@ -35,6 +36,14 @@ jobs:
             gh release download venue_rating  -p "${fmt}_venue_skill.parquet"  -D source
           done
 
+      - name: Download player metadata
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download cricsheet         -p "players.parquet"                  -D source
+          gh release download player_details   -p "bouncer_player_details.parquet"   -D source
+
       - name: Aggregate
         run: Rscript scripts/build_blog_data.R
 
@@ -57,3 +66,40 @@ jobs:
           for f in "${files[@]}"; do
             wrangler r2 object put "inthegame-data/$(basename "$f")" --file "$f" --remote
           done
+
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Build Blog Data Failed - ${new Date().toISOString().split('T')[0]}`;
+            const body = `## Workflow Failure
+
+            The build-blog-data workflow failed.
+
+            - **Run ID**: ${{ github.run_id }}
+            - **Run URL**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            - **Triggered by**: ${{ github.event_name }}
+
+            Please check the workflow logs for details.
+            `;
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'workflow-failure'
+            });
+
+            const today = new Date().toISOString().split('T')[0];
+            const existingIssue = issues.data.find(i => i.title.includes(today) && i.title.includes('Blog'));
+
+            if (!existingIssue) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['workflow-failure']
+              });
+            }

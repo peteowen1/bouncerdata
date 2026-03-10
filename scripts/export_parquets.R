@@ -12,18 +12,17 @@ library(arrow)
 library(jsonlite)
 library(cli)
 
-# Null coalescing operator
-`%||%` <- function(x, y) if (is.null(x)) y else x
-
 # Configuration
 DB_PATH <- "bouncer.duckdb"
 OUTPUT_DIR <- "parquet"
 
 #' Export a table to Parquet
+#' @param table_name Unqualified table name (main schema only).
+#'   For schema-qualified names, use DBI::Id(schema=, table=) instead.
 export_table <- function(con, table_name, output_path) {
   cli_alert_info("Exporting {basename(output_path)}...")
 
-  data <- DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", table_name))
+  data <- DBI::dbGetQuery(con, paste("SELECT * FROM", DBI::dbQuoteIdentifier(con, table_name)))
 
   if (nrow(data) == 0) {
     cli_alert_warning("  No data to export for {basename(output_path)}")

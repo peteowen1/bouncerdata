@@ -47,6 +47,7 @@ from playwright_stealth import Stealth
 from series_cache import (
     load_csv_cache, scan_parquets_for_series, merge_series, write_csv_cache,
     CSV_FIELDS, MAX_INNINGS,
+    normalize_format, infer_gender, CLASS_ID_MAP, FORMAT_STRING_MAP,
 )
 
 # ============================================================
@@ -57,15 +58,6 @@ DEFAULT_SERIES_LIST = SCRIPT_DIR / "series_list.csv"
 DEFAULT_CRICINFO_DIR = SCRIPT_DIR.parent / "cricinfo"
 
 stealth = Stealth()
-
-# internationalClassId → format string (same mapping as main scraper)
-FORMAT_FROM_CLASS_ID = {1: "test", 2: "odi", 3: "t20i"}
-
-# Format string variants → normalized
-FORMAT_NORMALIZE = {
-    "TEST": "test", "ODI": "odi", "T20I": "t20i", "T20": "t20i",
-    "MDM": "test", "ODM": "odi", "IT20": "t20i",
-}
 
 LIVE_SCORES_URL = "https://www.espncricinfo.com/live-cricket-score"
 SCHEDULE_URLS = [
@@ -96,15 +88,21 @@ def extract_next_data(page):
 
 def detect_format(obj):
     """Detect cricket format from a match or series object.
-    Returns 't20i', 'odi', 'test', or None."""
-    class_id = obj.get("internationalClassId")
-    if class_id and class_id in FORMAT_FROM_CLASS_ID:
-        return FORMAT_FROM_CLASS_ID[class_id]
+    Returns 't20i', 'odi', 'test', or None.
 
-    fmt_str = obj.get("format", "")
-    if fmt_str and fmt_str.upper() in FORMAT_NORMALIZE:
-        return FORMAT_NORMALIZE[fmt_str.upper()]
+    Uses the canonical normalize_format() from series_cache for class ID
+    and format string mapping, with name-based heuristics as fallback.
+    """
+    # Canonical detection via class ID and format string
+    result = normalize_format(
+        fmt_str=obj.get("format", ""),
+        class_id=obj.get("internationalClassId"),
+    )
+    if result:
+        return result
 
+    # Name-based heuristic fallback (not in canonical function since it's
+    # series-discovery-specific and too aggressive for general use)
     name = obj.get("longName", "") or obj.get("name", "") or obj.get("title", "") or ""
     name_upper = name.upper()
     if "T20" in name_upper or "IPL" in name_upper or "BBL" in name_upper or "CPL" in name_upper:
@@ -118,19 +116,14 @@ def detect_format(obj):
 
 
 def detect_gender(obj):
-    """Detect gender from a match or series object. Returns 'male' or 'female'."""
-    gender = obj.get("gender", "")
-    if gender:
-        g = gender.lower()
-        if g in ("male", "female"):
-            return g
+    """Detect gender from a match or series object. Returns 'male' or 'female'.
 
-    name = obj.get("longName", "") or obj.get("name", "") or obj.get("slug", "") or obj.get("title", "") or ""
-    name_lower = name.lower()
-    if any(kw in name_lower for kw in ("women", "female", "wbbl", "wpl", "wodi", "wt20")):
-        return "female"
-
-    return "male"
+    Uses the canonical infer_gender() from series_cache.
+    """
+    name = obj.get("longName", "") or obj.get("name", "") or obj.get("title", "") or ""
+    slug = obj.get("slug", "")
+    gender_field = obj.get("gender", "")
+    return infer_gender(name=name, slug=slug, gender_field=gender_field)
 
 
 def build_series_entry(series_id, name, slug, fmt, gender, season=None):

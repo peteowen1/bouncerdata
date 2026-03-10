@@ -19,7 +19,7 @@ on:
         type: boolean
 
 env:
-  R_VERSION: '4.3.2'
+  R_VERSION: 'release'
   GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
 permissions:
@@ -50,9 +50,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.R_LIBS_USER }}
-          key: ${{ runner.os }}-r-${{ env.R_VERSION }}-${{ hashFiles('bouncer/DESCRIPTION') }}
+          key: ${{ runner.os }}-r-${{ env.R_VERSION }}-cricsheet
           restore-keys: |
-            ${{ runner.os }}-r-${{ env.R_VERSION }}-
+            ${{ runner.os }}-r-${{ env.R_VERSION }}-cricsheet
 
       - name: Install R dependencies
         run: |
