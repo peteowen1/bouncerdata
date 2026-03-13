@@ -72,7 +72,7 @@ for (fmt in c("t20", "odi", "test")) {
   }
 
   batting <- batting |> arrange(desc(scoring_index))
-  write_parquet(batting, sprintf("blog/%s_batting.parquet", fmt))
+  write_parquet(batting, sprintf("blog/%s-batting.parquet", fmt))
   cat(sprintf("  %s batting: %d players\n", fmt, nrow(batting)))
 
   bowling <- ps |>
@@ -94,7 +94,7 @@ for (fmt in c("t20", "odi", "test")) {
   }
 
   bowling <- bowling |> arrange(economy_index)
-  write_parquet(bowling, sprintf("blog/%s_bowling.parquet", fmt))
+  write_parquet(bowling, sprintf("blog/%s-bowling.parquet", fmt))
   cat(sprintf("  %s bowling: %d players\n", fmt, nrow(bowling)))
 
   rm(ps); gc()
@@ -111,7 +111,7 @@ for (fmt in c("t20", "odi", "test")) {
            bowling_wicket_skill = bowling_team_wicket_skill,
            balls = batting_team_balls) |>
     arrange(desc(batting_runs_skill))
-  write_parquet(teams, sprintf("blog/%s_teams.parquet", fmt))
+  write_parquet(teams, sprintf("blog/%s-teams.parquet", fmt))
   cat(sprintf("  %s teams: %d teams\n", fmt, nrow(teams)))
   rm(ts); gc()
 
@@ -125,7 +125,7 @@ for (fmt in c("t20", "odi", "test")) {
            boundary_rate = venue_boundary_rate, dot_rate = venue_dot_rate,
            balls = venue_balls) |>
     arrange(desc(run_rate))
-  write_parquet(venues, sprintf("blog/%s_venues.parquet", fmt))
+  write_parquet(venues, sprintf("blog/%s-venues.parquet", fmt))
   cat(sprintf("  %s venues: %d venues\n", fmt, nrow(venues)))
   rm(vs); gc()
 }
