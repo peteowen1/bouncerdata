@@ -129,3 +129,36 @@ for (fmt in c("t20", "odi", "test")) {
   cat(sprintf("  %s venues: %d venues\n", fmt, nrow(venues)))
   rm(vs); gc()
 }
+
+# Build balls parquets (ball-by-ball data for match pages)
+balls_cols <- c("match_id", "title", "innings_number", "over_number", "ball_number",
+                "overs_actual", "total_runs", "batsman_runs", "is_four", "is_six",
+                "is_wicket", "dismissal_type", "dismissal_text", "wides", "noballs",
+                "wagon_x", "wagon_y", "batsman_player_id", "bowler_player_id",
+                "total_innings_runs", "total_innings_wickets", "predicted_score",
+                "win_probability")
+
+for (fmt in c("t20i", "odi", "test")) {
+  tryCatch({
+    balls_path <- sprintf("cricinfo/combined/cricinfo_balls_%s_male.parquet", fmt)
+    if (!file.exists(balls_path)) {
+      cat(sprintf("Skipping %s balls — file not found: %s\n", fmt, balls_path))
+      next
+    }
+
+    balls <- read_parquet(balls_path)
+    available <- intersect(balls_cols, names(balls))
+    missing <- setdiff(balls_cols, names(balls))
+    if (length(missing)) {
+      cat(sprintf("  %s balls: missing columns (will be NA): %s\n", fmt, paste(missing, collapse = ", ")))
+    }
+
+    balls <- balls |> select(all_of(available))
+    out_path <- sprintf("blog/balls-%s.parquet", fmt)
+    write_parquet(balls, out_path)
+    cat(sprintf("  %s balls: %d rows, %d cols -> %s\n", fmt, nrow(balls), ncol(balls), out_path))
+    rm(balls); gc()
+  }, error = function(e) {
+    warning(sprintf("Failed to build %s balls parquet: %s", fmt, conditionMessage(e)))
+  })
+}

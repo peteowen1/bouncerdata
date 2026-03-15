@@ -44,6 +44,20 @@ jobs:
           gh release download cricsheet         -p "players.parquet"                  -D source
           gh release download player_details   -p "bouncer_player_details.parquet"   -D source
 
+      - name: Download cricinfo balls data
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p cricinfo/combined
+          for fmt in t20i odi test; do
+            if gh release download cricinfo -p "cricinfo_balls_${fmt}_male.parquet" -D cricinfo/combined/; then
+              echo "Downloaded cricinfo_balls_${fmt}_male.parquet"
+            else
+              echo "::warning::cricinfo_balls_${fmt}_male.parquet not available"
+            fi
+          done
+
       - name: Aggregate
         run: Rscript scripts/build_blog_data.R
 
