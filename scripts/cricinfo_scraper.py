@@ -1274,6 +1274,8 @@ def save_all_tables(balls, match_meta, innings_data, match_id, format_dir, outpu
 
     # Innings table (one row per batsman per innings)
     if innings_data:
+        for row in innings_data:
+            row["match_id"] = match_id
         table = pa.Table.from_pylist(innings_data)
         outpath = outdir / f"{match_id}_innings.parquet"
         tmppath = outpath.with_suffix(".parquet.tmp")
