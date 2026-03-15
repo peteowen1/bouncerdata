@@ -72,7 +72,7 @@ for (fmt in c("t20", "odi", "test")) {
   }
 
   batting <- batting |> arrange(desc(scoring_index))
-  write_parquet(batting, sprintf("blog/%s_batting.parquet", fmt))
+  write_parquet(batting, sprintf("blog/%s-batting.parquet", fmt))
   cat(sprintf("  %s batting: %d players\n", fmt, nrow(batting)))
 
   bowling <- ps |>
@@ -94,7 +94,7 @@ for (fmt in c("t20", "odi", "test")) {
   }
 
   bowling <- bowling |> arrange(economy_index)
-  write_parquet(bowling, sprintf("blog/%s_bowling.parquet", fmt))
+  write_parquet(bowling, sprintf("blog/%s-bowling.parquet", fmt))
   cat(sprintf("  %s bowling: %d players\n", fmt, nrow(bowling)))
 
   rm(ps); gc()
@@ -111,7 +111,7 @@ for (fmt in c("t20", "odi", "test")) {
            bowling_wicket_skill = bowling_team_wicket_skill,
            balls = batting_team_balls) |>
     arrange(desc(batting_runs_skill))
-  write_parquet(teams, sprintf("blog/%s_teams.parquet", fmt))
+  write_parquet(teams, sprintf("blog/%s-teams.parquet", fmt))
   cat(sprintf("  %s teams: %d teams\n", fmt, nrow(teams)))
   rm(ts); gc()
 
@@ -125,7 +125,71 @@ for (fmt in c("t20", "odi", "test")) {
            boundary_rate = venue_boundary_rate, dot_rate = venue_dot_rate,
            balls = venue_balls) |>
     arrange(desc(run_rate))
-  write_parquet(venues, sprintf("blog/%s_venues.parquet", fmt))
+  write_parquet(venues, sprintf("blog/%s-venues.parquet", fmt))
   cat(sprintf("  %s venues: %d venues\n", fmt, nrow(venues)))
   rm(vs); gc()
 }
+
+# Build balls parquets (ball-by-ball data for match pages)
+# Also builds player-names.parquet lookup from title field
+balls_cols <- c("match_id", "title", "innings_number", "over_number", "ball_number",
+                "overs_actual", "total_runs", "batsman_runs", "is_four", "is_six",
+                "is_wicket", "dismissal_type", "dismissal_text", "wides", "noballs",
+                "wagon_x", "wagon_y", "batsman_player_id", "bowler_player_id",
+                "total_innings_runs", "total_innings_wickets", "predicted_score",
+                "win_probability")
+
+all_player_pairs <- list()
+
+for (fmt in c("t20i", "odi", "test")) {
+  tryCatch({
+    balls_path <- sprintf("cricinfo/combined/cricinfo_balls_%s_male.parquet", fmt)
+    if (!file.exists(balls_path)) {
+      cat(sprintf("Skipping %s balls — file not found: %s\n", fmt, balls_path))
+      next
+    }
+
+    balls <- read_parquet(balls_path)
+    available <- intersect(balls_cols, names(balls))
+    missing <- setdiff(balls_cols, names(balls))
+    if (length(missing)) {
+      cat(sprintf("  %s balls: missing columns (will be NA): %s\n", fmt, paste(missing, collapse = ", ")))
+    }
+
+    # Collect player ID→name pairs from title field ("BowlerName to BatsmanName")
+    if ("title" %in% names(balls) && "batsman_player_id" %in% names(balls)) {
+      parts <- strsplit(balls$title, " to ", fixed = TRUE)
+      bowler_names <- vapply(parts, function(p) if (length(p) >= 2) p[1] else NA_character_, character(1))
+      batsman_names <- vapply(parts, function(p) if (length(p) >= 2) p[2] else NA_character_, character(1))
+      all_player_pairs[[paste0(fmt, "_bat")]] <- data.frame(
+        player_id = balls$batsman_player_id, player_name = batsman_names, stringsAsFactors = FALSE
+      ) |> filter(!is.na(player_id), !is.na(player_name)) |> distinct()
+      all_player_pairs[[paste0(fmt, "_bowl")]] <- data.frame(
+        player_id = balls$bowler_player_id, player_name = bowler_names, stringsAsFactors = FALSE
+      ) |> filter(!is.na(player_id), !is.na(player_name)) |> distinct()
+    }
+
+    balls <- balls |> select(all_of(available))
+    out_path <- sprintf("blog/balls-%s.parquet", fmt)
+    write_parquet(balls, out_path)
+    cat(sprintf("  %s balls: %d rows, %d cols -> %s\n", fmt, nrow(balls), ncol(balls), out_path))
+    rm(balls); gc()
+  }, error = function(e) {
+    warning(sprintf("Failed to build %s balls parquet: %s", fmt, conditionMessage(e)))
+  })
+}
+
+# Build player-names.parquet from collected title pairs
+tryCatch({
+  player_lookup <- bind_rows(all_player_pairs) |>
+    count(player_id, player_name) |>
+    group_by(player_id) |>
+    slice_max(n, n = 1, with_ties = FALSE) |>
+    ungroup() |>
+    select(player_id, player_name) |>
+    arrange(player_id)
+  write_parquet(player_lookup, "blog/player-names.parquet")
+  cat(sprintf("  player-names: %d players\n", nrow(player_lookup)))
+}, error = function(e) {
+  warning("Failed to build player-names.parquet: ", conditionMessage(e))
+})
