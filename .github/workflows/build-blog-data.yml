@@ -51,11 +51,13 @@ jobs:
         run: |
           mkdir -p cricinfo/combined
           for fmt in t20i odi test; do
-            if gh release download cricinfo -p "cricinfo_balls_${fmt}_male.parquet" -D cricinfo/combined/; then
-              echo "Downloaded cricinfo_balls_${fmt}_male.parquet"
-            else
-              echo "::warning::cricinfo_balls_${fmt}_male.parquet not available"
-            fi
+            for type in balls innings; do
+              if gh release download cricinfo -p "cricinfo_${type}_${fmt}_male.parquet" -D cricinfo/combined/; then
+                echo "Downloaded cricinfo_${type}_${fmt}_male.parquet"
+              else
+                echo "::warning::cricinfo_${type}_${fmt}_male.parquet not available"
+              fi
+            done
           done
 
       - name: Aggregate
