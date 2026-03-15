@@ -156,34 +156,18 @@ for (fmt in c("t20i", "odi", "test")) {
       cat(sprintf("  %s balls: missing columns (will be NA): %s\n", fmt, paste(missing, collapse = ", ")))
     }
 
-    # Build match titles from innings team names (if innings data available)
-    innings_path <- sprintf("cricinfo/combined/cricinfo_innings_%s_male.parquet", fmt)
-    if (file.exists(innings_path)) {
-      innings <- read_parquet(innings_path, col_select = c("match_id", "team_name")) |>
-        distinct(match_id, team_name)
-      match_titles <- innings |>
-        group_by(match_id) |>
-        summarise(match_title = paste(team_name, collapse = " vs "), .groups = "drop")
-      balls <- balls |> left_join(match_titles, by = "match_id")
-      # Replace ball-level title with match title where available
-      if ("match_title" %in% names(balls)) {
-        balls$title <- ifelse(!is.na(balls$match_title), balls$match_title, balls$title)
-        balls$match_title <- NULL
-      }
-    }
-
     # Collect player ID→name pairs from title field ("BowlerName to BatsmanName")
-    parts <- strsplit(read_parquet(balls_path, col_select = "title")$title, " to ", fixed = TRUE)
-    bat_ids <- read_parquet(balls_path, col_select = "batsman_player_id")$batsman_player_id
-    bowl_ids <- read_parquet(balls_path, col_select = "bowler_player_id")$bowler_player_id
-    bowler_names <- sapply(parts, function(p) if (length(p) >= 2) p[1] else NA_character_)
-    batsman_names <- sapply(parts, function(p) if (length(p) >= 2) p[2] else NA_character_)
-    all_player_pairs[[paste0(fmt, "_bat")]] <- data.frame(
-      player_id = bat_ids, player_name = batsman_names, stringsAsFactors = FALSE
-    ) |> filter(!is.na(player_id), !is.na(player_name)) |> distinct()
-    all_player_pairs[[paste0(fmt, "_bowl")]] <- data.frame(
-      player_id = bowl_ids, player_name = bowler_names, stringsAsFactors = FALSE
-    ) |> filter(!is.na(player_id), !is.na(player_name)) |> distinct()
+    if ("title" %in% names(balls) && "batsman_player_id" %in% names(balls)) {
+      parts <- strsplit(balls$title, " to ", fixed = TRUE)
+      bowler_names <- vapply(parts, function(p) if (length(p) >= 2) p[1] else NA_character_, character(1))
+      batsman_names <- vapply(parts, function(p) if (length(p) >= 2) p[2] else NA_character_, character(1))
+      all_player_pairs[[paste0(fmt, "_bat")]] <- data.frame(
+        player_id = balls$batsman_player_id, player_name = batsman_names, stringsAsFactors = FALSE
+      ) |> filter(!is.na(player_id), !is.na(player_name)) |> distinct()
+      all_player_pairs[[paste0(fmt, "_bowl")]] <- data.frame(
+        player_id = balls$bowler_player_id, player_name = bowler_names, stringsAsFactors = FALSE
+      ) |> filter(!is.na(player_id), !is.na(player_name)) |> distinct()
+    }
 
     balls <- balls |> select(all_of(available))
     out_path <- sprintf("blog/balls-%s.parquet", fmt)
