@@ -62,3 +62,10 @@ __pycache__/
 
 # Archived files (obsolete VM scripts, etc.)
 archive/
+
+# Cloudflare Wrangler cache
+.wrangler/
+
+# Blog data build artifacts (regenerable via build-blog-data workflow)
+blog/
+source/
