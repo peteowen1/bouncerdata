@@ -60,6 +60,18 @@ jobs:
             done
           done
 
+      - name: Download predictions
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p blog
+          if gh release download predictions-latest -p "predictions.parquet" -D blog/; then
+            echo "Downloaded predictions.parquet"
+          else
+            echo "::warning::predictions.parquet not available yet"
+          fi
+
       - name: Aggregate
         run: Rscript scripts/build_blog_data.R
 
