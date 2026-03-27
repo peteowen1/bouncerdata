@@ -417,15 +417,6 @@ jobs:
           echo "- **Rebuild type**: ${{ steps.sync.outputs.rebuild_type }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Final match count**: ${{ steps.sync.outputs.final_count }}" >> $GITHUB_STEP_SUMMARY
 
-      - name: Dispatch predictions trigger
-        if: success() && steps.sync.outputs.new_count != '0'
-        env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
-        run: |
-          gh api repos/peteowen1/bouncer/dispatches \
-            -f event_type=cricsheet-complete
-          echo "Dispatched predictions trigger to bouncer (${{ steps.sync.outputs.new_count }} new matches)"
-
       - name: Create issue on failure
         if: failure()
         uses: actions/github-script@v7
