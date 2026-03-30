@@ -36,7 +36,10 @@ on:
 
 env:
   R_VERSION: 'release'
-  GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+concurrency:
+  group: foxsports-daily
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -86,6 +89,8 @@ jobs:
             foxsports-discovery-
 
       - name: Install R dependencies
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: |
           install.packages(c("remotes", "httr2", "jsonlite", "arrow", "piggyback", "cli", "dplyr", "chromote", "websocket"))
           remotes::install_github("peteowen1/bouncer@dev", dependencies = TRUE)
