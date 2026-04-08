@@ -2,10 +2,9 @@ name: Build blog data
 
 on:
   workflow_dispatch:
-  # Uncomment to trigger after your main data pipeline:
-  # workflow_run:
-  #   workflows: ["Update data"]
-  #   types: [completed]
+  workflow_run:
+    workflows: ["Cricinfo Scrape"]
+    types: [completed]
 
 permissions:
   contents: read
