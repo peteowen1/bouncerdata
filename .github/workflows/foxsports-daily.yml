@@ -52,10 +52,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Chrome
-        uses: browser-actions/setup-chrome@v1
+        uses: browser-actions/setup-chrome@v2
         with:
           chrome-version: stable
         id: setup-chrome
@@ -72,7 +72,7 @@ jobs:
           sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
 
       - name: Cache R packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ env.R_LIBS_USER }}
           key: ${{ runner.os }}-r-${{ env.R_VERSION }}-foxsports
@@ -80,7 +80,7 @@ jobs:
             ${{ runner.os }}-r-${{ env.R_VERSION }}-foxsports
 
       - name: Cache Fox Sports discovery files
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             fox_discovered_*.rds
@@ -502,7 +502,7 @@ jobs:
 
       - name: Create issue on failure
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const title = `Fox Sports Daily Scrape Failed - ${new Date().toISOString().split('T')[0]}`;
