@@ -20,6 +20,7 @@ on:
 
 env:
   R_VERSION: 'release'
+  GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
 concurrency:
   group: cricsheet-daily
@@ -58,8 +59,6 @@ jobs:
             ${{ runner.os }}-r-${{ env.R_VERSION }}-cricsheet
 
       - name: Install R dependencies
-        env:
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: |
           install.packages(c("remotes", "httr2", "jsonlite", "arrow", "piggyback", "cli", "dplyr"))
           remotes::install_github("peteowen1/bouncer@dev", dependencies = TRUE)
@@ -409,8 +408,6 @@ jobs:
 
           cli::cli_h1("Sync Complete!")
         shell: Rscript {0}
-        env:
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Summary
         run: |
