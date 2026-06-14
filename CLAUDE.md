@@ -29,6 +29,8 @@ bouncerdata/
 ├── fox_cricket/           <- Fox Sports scraped data (gitignored)
 ├── json_files/            <- Raw Cricsheet JSON (gitignored, re-downloadable)
 ├── parquet/               <- Exported parquet files for releases
+├── source/                <- Source skill/player parquets feeding blog data builds
+├── blog/                  <- Aggregated leaderboard/ranking parquets for blog/website
 ├── manifests/             <- Cricsheet manifest files
 ├── checkpoints/           <- Pipeline checkpoint files
 └── temp_*/                <- Temporary working directories (gitignored)
