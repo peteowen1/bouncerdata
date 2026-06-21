@@ -26,7 +26,7 @@ jobs:
 
       - name: Download source parquets
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
         run: |
           mkdir -p source
           for fmt in t20 odi test; do
@@ -38,7 +38,7 @@ jobs:
       - name: Download player metadata
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
         run: |
           gh release download cricsheet         -p "players.parquet"                  -D source
           gh release download player_details   -p "bouncer_player_details.parquet"   -D source
@@ -46,7 +46,7 @@ jobs:
       - name: Download cricinfo balls data
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
         run: |
           mkdir -p cricinfo/combined
           for fmt in t20i odi test; do
@@ -62,7 +62,7 @@ jobs:
       - name: Download predictions
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
         run: |
           mkdir -p blog
           if gh release download predictions-latest -p "predictions.parquet" -D blog/; then

@@ -20,6 +20,7 @@ on:
 
 env:
   R_VERSION: 'release'
+  GITHUB_PAT: ${{ secrets.WORKFLOW_PAT }}
 
 concurrency:
   group: cricsheet-daily
@@ -58,8 +59,6 @@ jobs:
             ${{ runner.os }}-r-${{ env.R_VERSION }}-cricsheet
 
       - name: Install R dependencies
-        env:
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: |
           install.packages(c("remotes", "httr2", "jsonlite", "arrow", "piggyback", "cli", "dplyr"))
           remotes::install_github("peteowen1/bouncer@dev", dependencies = TRUE)
@@ -339,10 +338,35 @@ jobs:
             # Merge and write
             cli::cli_h2("Merging new data")
 
+            # Harmonize column types across frames before binding. When a column is
+            # entirely empty in one file it gets inferred as logical/integer, while
+            # populated files type it as character (e.g. event_group); bind_rows()
+            # then errors on the type clash. One pass collects the types seen per
+            # column; conflicting columns are then coerced to character in a single
+            # rebuild of the frame list.
+            harmonize_types <- function(frames) {
+              frames <- Filter(Negate(is.null), frames)
+              if (length(frames) < 2) return(frames)
+              type_map <- list()
+              for (d in frames) {
+                for (col in names(d)) {
+                  type_map[[col]] <- unique(c(type_map[[col]], class(d[[col]])[1]))
+                }
+              }
+              conflicting <- names(type_map)[vapply(type_map, length, integer(1)) > 1L]
+              if (length(conflicting) == 0) return(frames)
+              lapply(frames, function(d) {
+                for (col in intersect(conflicting, names(d))) {
+                  d[[col]] <- as.character(d[[col]])
+                }
+                d
+              })
+            }
+
             merge_and_write <- function(new_data, filename, key_col = NULL) {
               existing_file <- file.path(parquet_dir, filename)
               # Use dplyr::bind_rows to handle schema differences (new columns in newer data)
-              new_df <- if (length(new_data) > 0) dplyr::bind_rows(new_data) else NULL
+              new_df <- if (length(new_data) > 0) dplyr::bind_rows(harmonize_types(new_data)) else NULL
 
               if (is.null(new_df) || nrow(new_df) == 0) {
                 return(FALSE)
@@ -351,7 +375,7 @@ jobs:
               if (file.exists(existing_file)) {
                 existing_df <- arrow::read_parquet(existing_file)
                 # bind_rows handles mismatched columns gracefully (fills with NA)
-                combined <- dplyr::bind_rows(existing_df, new_df)
+                combined <- dplyr::bind_rows(harmonize_types(list(existing_df, new_df)))
 
                 # Deduplicate if key column provided
                 if (!is.null(key_col) && key_col %in% names(combined)) {
@@ -409,8 +433,6 @@ jobs:
 
           cli::cli_h1("Sync Complete!")
         shell: Rscript {0}
-        env:
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Summary
         run: |

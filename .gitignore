@@ -23,7 +23,6 @@ json_files/
 
 # Claude Code
 .claude/
-CLAUDE.md
 tmpclaude-*
 .Rproj.user
 
