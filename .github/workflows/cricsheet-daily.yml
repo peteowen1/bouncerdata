@@ -338,10 +338,31 @@ jobs:
             # Merge and write
             cli::cli_h2("Merging new data")
 
+            # Harmonize column types across frames before binding. When a column is
+            # entirely empty in one file it gets inferred as logical/integer, while
+            # populated files type it as character (e.g. event_group); bind_rows()
+            # then errors on the type clash. Coerce any column whose type differs
+            # across frames to character so the bind always succeeds.
+            harmonize_types <- function(frames) {
+              frames <- Filter(Negate(is.null), frames)
+              cols <- unique(unlist(lapply(frames, names)))
+              for (col in cols) {
+                types <- unique(unlist(lapply(frames, function(d)
+                  if (col %in% names(d)) class(d[[col]])[1])))
+                if (length(types) > 1) {
+                  frames <- lapply(frames, function(d) {
+                    if (col %in% names(d)) d[[col]] <- as.character(d[[col]])
+                    d
+                  })
+                }
+              }
+              frames
+            }
+
             merge_and_write <- function(new_data, filename, key_col = NULL) {
               existing_file <- file.path(parquet_dir, filename)
               # Use dplyr::bind_rows to handle schema differences (new columns in newer data)
-              new_df <- if (length(new_data) > 0) dplyr::bind_rows(new_data) else NULL
+              new_df <- if (length(new_data) > 0) dplyr::bind_rows(harmonize_types(new_data)) else NULL
 
               if (is.null(new_df) || nrow(new_df) == 0) {
                 return(FALSE)
@@ -350,7 +371,7 @@ jobs:
               if (file.exists(existing_file)) {
                 existing_df <- arrow::read_parquet(existing_file)
                 # bind_rows handles mismatched columns gracefully (fills with NA)
-                combined <- dplyr::bind_rows(existing_df, new_df)
+                combined <- dplyr::bind_rows(harmonize_types(list(existing_df, new_df)))
 
                 # Deduplicate if key column provided
                 if (!is.null(key_col) && key_col %in% names(combined)) {
