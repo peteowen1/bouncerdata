@@ -20,7 +20,7 @@ on:
 
 env:
   R_VERSION: 'release'
-  GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+  GITHUB_PAT: ${{ secrets.WORKFLOW_PAT }}
 
 concurrency:
   group: cricsheet-daily
@@ -341,22 +341,26 @@ jobs:
             # Harmonize column types across frames before binding. When a column is
             # entirely empty in one file it gets inferred as logical/integer, while
             # populated files type it as character (e.g. event_group); bind_rows()
-            # then errors on the type clash. Coerce any column whose type differs
-            # across frames to character so the bind always succeeds.
+            # then errors on the type clash. One pass collects the types seen per
+            # column; conflicting columns are then coerced to character in a single
+            # rebuild of the frame list.
             harmonize_types <- function(frames) {
               frames <- Filter(Negate(is.null), frames)
-              cols <- unique(unlist(lapply(frames, names)))
-              for (col in cols) {
-                types <- unique(unlist(lapply(frames, function(d)
-                  if (col %in% names(d)) class(d[[col]])[1])))
-                if (length(types) > 1) {
-                  frames <- lapply(frames, function(d) {
-                    if (col %in% names(d)) d[[col]] <- as.character(d[[col]])
-                    d
-                  })
+              if (length(frames) < 2) return(frames)
+              type_map <- list()
+              for (d in frames) {
+                for (col in names(d)) {
+                  type_map[[col]] <- unique(c(type_map[[col]], class(d[[col]])[1]))
                 }
               }
-              frames
+              conflicting <- names(type_map)[vapply(type_map, length, integer(1)) > 1L]
+              if (length(conflicting) == 0) return(frames)
+              lapply(frames, function(d) {
+                for (col in intersect(conflicting, names(d))) {
+                  d[[col]] <- as.character(d[[col]])
+                }
+                d
+              })
             }
 
             merge_and_write <- function(new_data, filename, key_col = NULL) {
