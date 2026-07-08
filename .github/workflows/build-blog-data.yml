@@ -2,6 +2,8 @@ name: Build blog data
 
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [predictions-complete]
   workflow_run:
     workflows: ["Cricinfo Scrape"]
     types: [completed]
@@ -13,6 +15,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Only skip when triggered by a failed/cancelled upstream workflow_run -
+    # workflow_dispatch and repository_dispatch (predictions-complete) always run.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v6
 
