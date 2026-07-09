@@ -95,7 +95,7 @@ Workflows live in THIS repo (`.github/workflows/`) so `GITHUB_TOKEN` has release
 
 **Build Blog Data:**
 - Downloads skill parquets from `player_rating`, `team_rating`, `venue_rating` releases
-- Aggregates into compact leaderboard/ranking parquets (9 files: batting/bowling/teams/venues × format)
+- Aggregates into compact leaderboard/ranking parquets (16 files: 12 leaderboard [batting/bowling/teams/venues × format] + 3 ball-by-ball [balls-{t20i,odi,test}] + player-names.parquet)
 - Uploads to Cloudflare R2 bucket `inthegame-data` via `wrangler`
 - Trigger: `gh workflow run build-blog-data.yml --repo peteowen1/bouncerdata --ref dev`
 
@@ -163,7 +163,7 @@ Uses DuckDB schemas: `cricsheet.*`, `cricinfo.*`, `main.*` (see `bouncer/CLAUDE.
 - **cricinfo.fixtures**: Schedule/results index
 - **main.team_elo**: Team ELO ratings per match
 - **main.{format}_player_skill**: Player skill indices (test, odi, t20)
-- **main.{format}_3way_player_elo**: 3-way ELO ratings (batter, bowler, venue)
+- **main.{format}_3way_elo**: 3-way ELO ratings (batter, bowler, venue)
 - **main.{format}_team_skill**: Team batting/bowling skill indices
 - **main.{format}_venue_skill**: Venue run/wicket/boundary rates
 - **main.{format}_score_projection**: Projected scores per delivery
@@ -175,7 +175,7 @@ See `bouncer/CLAUDE.md` for full schema details including column names and deliv
 | Secret | Used By | Purpose |
 |--------|---------|---------|
 | `GITHUB_TOKEN` | All workflows | Release uploads (auto-provided) |
-| `BOUNCERDATA_PAT` | cricsheet-daily | Cross-repo release uploads |
+| `WORKFLOW_PAT` | cricsheet-daily, cricinfo-daily | Cross-repo release uploads + repository_dispatch |
 | `CLOUDFLARE_R2_TOKEN` | build-blog-data | Cloudflare R2 API token |
 | `CLOUDFLARE_ACCOUNT_ID` | build-blog-data | Cloudflare account ID |
 

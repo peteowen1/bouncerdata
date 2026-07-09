@@ -377,9 +377,10 @@ jobs:
                 # bind_rows handles mismatched columns gracefully (fills with NA)
                 combined <- dplyr::bind_rows(harmonize_types(list(existing_df, new_df)))
 
-                # Deduplicate if key column provided
-                if (!is.null(key_col) && key_col %in% names(combined)) {
-                  combined <- combined[!duplicated(combined[[key_col]]), ]
+                # Deduplicate if key column(s) provided (key_col may be a
+                # composite key, e.g. c("match_id", "innings"))
+                if (!is.null(key_col) && all(key_col %in% names(combined))) {
+                  combined <- combined[!duplicated(combined[key_col]), ]
                 }
               } else {
                 combined <- new_df
@@ -392,14 +393,15 @@ jobs:
 
             merge_and_write(new_matches, "matches.parquet", "match_id")
             merge_and_write(new_players, "players.parquet", "player_id")
-            merge_and_write(new_innings, "match_innings.parquet")
-            merge_and_write(new_powerplays, "innings_powerplays.parquet")
+            merge_and_write(new_innings, "match_innings.parquet", c("match_id", "innings"))
+            merge_and_write(new_powerplays, "innings_powerplays.parquet", "powerplay_id")
 
             # Merge delivery partitions
             for (pk in affected_partitions) {
               merge_and_write(
                 new_deliveries_by_partition[[pk]],
-                paste0("deliveries_", pk, ".parquet")
+                paste0("deliveries_", pk, ".parquet"),
+                "delivery_id"
               )
             }
           }
