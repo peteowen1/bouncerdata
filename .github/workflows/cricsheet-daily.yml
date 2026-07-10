@@ -419,13 +419,34 @@ jobs:
             error = function(e) cli::cli_alert_info("Release already exists")
           )
 
-          for (f in list.files(parquet_dir, full.names = TRUE)) {
+          # Manifest is uploaded LAST, gated on zero data-file upload failures
+          # (bouncer C1 / ECOSYSTEM-FIX-PLAN.md manifest-last invariant): if any
+          # data file fails to upload, the manifest must not advertise its
+          # match_ids as present, or the next run's
+          # setdiff(recent_ids, manifest$match_ids) treats those matches as
+          # already synced and never retries them - permanent silent data loss.
+          manifest_file <- file.path(parquet_dir, "manifest.json")
+          data_files <- setdiff(list.files(parquet_dir, full.names = TRUE), manifest_file)
+
+          upload_failures <- character(0)
+          for (f in data_files) {
             tryCatch({
               piggyback::pb_upload(f, repo = "peteowen1/bouncerdata", tag = "cricsheet", overwrite = TRUE)
               cli::cli_alert_success("Uploaded {basename(f)}")
             }, error = function(e) {
-              cli::cli_alert_warning("Failed to upload {basename(f)}: {e$message}")
+              cli::cli_alert_danger("Failed to upload {basename(f)}: {e$message}")
+              upload_failures <<- c(upload_failures, basename(f))
             })
+          }
+
+          if (length(upload_failures) > 0) {
+            cli::cli_alert_danger("{length(upload_failures)} data file upload(s) failed: {paste(upload_failures, collapse = ', ')}")
+            stop("Aborting before manifest upload - refusing to advertise matches whose data isn't fully on the release (bouncer C1). Next run will retry these matches.")
+          }
+
+          if (file.exists(manifest_file)) {
+            piggyback::pb_upload(manifest_file, repo = "peteowen1/bouncerdata", tag = "cricsheet", overwrite = TRUE)
+            cli::cli_alert_success("Uploaded {basename(manifest_file)}")
           }
 
           # Cleanup
