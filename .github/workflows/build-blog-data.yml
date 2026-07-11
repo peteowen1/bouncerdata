@@ -12,6 +12,10 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: bouncer-r2-writer
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
