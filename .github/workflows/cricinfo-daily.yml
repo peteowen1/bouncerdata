@@ -71,7 +71,7 @@ jobs:
           # GitHub caps releases at 1000 assets. Per-match uploads (3 assets/match)
           # eat headroom fast; fail loudly here, BEFORE any scraping/upload work,
           # instead of letting per-match uploads start silently warn-and-skip near
-          # the cap (see FABLE-REVIEW.md finding H7).
+          # the cap (see ../../../docs/reviews/FABLE-REVIEW.md finding H7).
           ASSET_COUNT=$(gh release view cricinfo --json assets --jq '.assets | length' 2>/dev/null || echo 0)
           echo "cricinfo release currently has $ASSET_COUNT / 1000 assets (GitHub's per-release cap)"
           echo "- **Asset count**: $ASSET_COUNT / 1000" >> $GITHUB_STEP_SUMMARY
@@ -270,7 +270,7 @@ jobs:
           echo "- **Uploaded this run**: $UPLOADED" >> $GITHUB_STEP_SUMMARY
           echo "- **Failed this run**: $FAILED" >> $GITHUB_STEP_SUMMARY
           # Per-file upload failures used to be warn-only (silently degrading once the
-          # release neared GitHub's 1000-asset cap — see FABLE-REVIEW.md H7). Any
+          # release neared GitHub's 1000-asset cap — see ../../../docs/reviews/FABLE-REVIEW.md H7). Any
           # failure now fails the job so it surfaces as a workflow failure/issue
           # instead of a buried warning in the logs.
           if [ "$FAILED" -gt 0 ]; then

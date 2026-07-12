@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-time consolidation migration for the `cricinfo` GitHub release.
 
-CONTEXT (see FABLE-REVIEW.md finding H7, follow-up review 2026-07-10)
+CONTEXT (see ../../docs/reviews/FABLE-REVIEW.md finding H7, follow-up review 2026-07-10)
 ----------------------------------------------------------------------
 cricinfo-daily.yml uploads 3 per-match parquet assets per newly-scraped match
 (`{format}_{gender}__{match_id}_{balls,match,innings}.parquet`) IN ADDITION TO
@@ -52,7 +52,7 @@ since it currently sits at ~965 per-match assets and this migration should
 remove nearly all of them). Permanently stopping per-match asset growth
 requires restoring the scraper's local "already scraped" state from the
 combined bundles instead of from per-match release assets on every run --
-that is a deeper workflow rework (see FABLE-REVIEW.md's "Deeper refactors"
+that is a deeper workflow rework (see ../../docs/reviews/FABLE-REVIEW.md's "Deeper refactors"
 list, C4/H7/H9/M11) and is deliberately OUT OF SCOPE for this script. Re-run
 this migration periodically (or once that rework lands) to stay under the
 950-asset guard added to cricinfo-daily.yml.
