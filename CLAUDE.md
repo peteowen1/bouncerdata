@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Work on `dev` branch, not directly on `main`
 - Large data files are gitignored - distributed via GitHub Releases
 
-Verse-level docs (reviews, plans, decision log, work queue) live in `../CLAUDE.md`'s vault at `bouncerverse/` — see `../HOME.md`.
+Verse-level docs (reviews, plans, decision log, work queue) live in `../CLAUDE.md`'s vault at `bouncerverse/` — see `../docs/HOME.md`.
 
 ## Directory Structure
 
