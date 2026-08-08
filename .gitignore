@@ -68,3 +68,6 @@ archive/
 # Blog data build artifacts (regenerable via build-blog-data workflow)
 blog/
 source/
+
+# Local dry-run output from scripts/consolidate_cricinfo_assets.py
+cricinfo_consolidation_report_*.json
