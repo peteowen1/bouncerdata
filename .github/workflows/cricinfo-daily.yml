@@ -72,7 +72,19 @@ jobs:
           # eat headroom fast; fail loudly here, BEFORE any scraping/upload work,
           # instead of letting per-match uploads start silently warn-and-skip near
           # the cap (see ../../../docs/reviews/FABLE-REVIEW.md finding H7).
-          ASSET_COUNT=$(gh release view cricinfo --json assets --jq '.assets | length' 2>/dev/null || echo 0)
+          # `|| echo 0` on ANY gh failure would make a transient API error, an
+          # auth problem or a rate limit look identical to "0 assets" — walking
+          # straight past the one guard whose whole purpose is to stop us
+          # reaching the cap. Only a genuinely-absent release counts as 0.
+          if ASSET_JSON=$(gh release view cricinfo --json assets 2>"$RUNNER_TEMP/gh_err"); then
+            ASSET_COUNT=$(echo "$ASSET_JSON" | jq '.assets | length')
+          elif grep -qi "release not found" "$RUNNER_TEMP/gh_err"; then
+            ASSET_COUNT=0
+            echo "cricinfo release does not exist yet — treating as 0 assets"
+          else
+            echo "::error::could not read the cricinfo release asset count, so the cap guard cannot run. Refusing to proceed. gh said: $(cat "$RUNNER_TEMP/gh_err")"
+            exit 1
+          fi
           echo "cricinfo release currently has $ASSET_COUNT / 1000 assets (GitHub's per-release cap)"
           echo "- **Asset count**: $ASSET_COUNT / 1000" >> $GITHUB_STEP_SUMMARY
           if [ "$ASSET_COUNT" -ge 950 ]; then
