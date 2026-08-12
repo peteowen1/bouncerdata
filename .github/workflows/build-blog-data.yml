@@ -44,13 +44,21 @@ jobs:
             gh release download venue_rating  -p "${fmt}_venue_skill.parquet"  -D source
           done
 
-      - name: Download player metadata
+      # players.parquet is REQUIRED: every blog table keys on player names, and
+      # build_blog_data.R falls back to raw IDs without it. This step used to be
+      # continue-on-error, so a transient release failure published a live blog
+      # full of UUIDs on a green run. Only the optional enrichment may fail.
+      - name: Download player registry (required)
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+        run: gh release download cricsheet -p "players.parquet" -D source
+
+      - name: Download player enrichment (optional)
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
         run: |
-          gh release download cricsheet         -p "players.parquet"                  -D source
-          gh release download player_details   -p "bouncer_player_details.parquet"   -D source
+          gh release download player_details -p "bouncer_player_details.parquet" -D source
 
       - name: Download cricinfo balls data
         continue-on-error: true

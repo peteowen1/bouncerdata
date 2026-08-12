@@ -3,20 +3,34 @@ library(dplyr)
 
 dir.create("blog", showWarnings = FALSE)
 
-min_balls_batting  <- c(t20 = 100, odi = 300, test = 500)
-min_balls_bowling  <- c(t20 = 100, odi = 300, test = 500)
+# Qualification thresholds. Batting and bowling share the same values today;
+# kept as one vector so they cannot drift apart silently.
+min_balls_qualifying <- c(t20 = 100, odi = 300, test = 500)
 
 # Load player metadata (cricsheet names + cricinfo enrichment)
 players_path <- "source/players.parquet"
 details_path <- "source/bouncer_player_details.parquet"
 
-if (file.exists(players_path)) {
-  players <- read_parquet(players_path) |>
-    select(player_id, player_name)
-  cat(sprintf("Loaded player registry: %d players\n", nrow(players)))
-} else {
-  warning("players.parquet not found — player names will be IDs")
-  players <- NULL
+# The player registry is REQUIRED, not best-effort.
+#
+# Its download step in build-blog-data.yml is continue-on-error, so a
+# transient GitHub Releases failure leaves this file absent. Warning and
+# carrying on published a live blog whose player column held raw UUIDs
+# instead of names, with a green workflow run and no signal that anything
+# had gone wrong. A missing registry now stops the build before the R2
+# upload step can run.
+if (!file.exists(players_path)) {
+  stop("Required source file missing: ", players_path, "\n",
+       "  The blog tables key on player names; without the registry every ",
+       "row would publish a raw player_id.\n",
+       "  Re-run the 'Download player metadata' step, or check the ",
+       "cricsheet release.")
+}
+players <- read_parquet(players_path) |>
+  select(player_id, player_name)
+cat(sprintf("Loaded player registry: %d players\n", nrow(players)))
+if (nrow(players) == 0) {
+  stop("Player registry is empty: ", players_path)
 }
 
 if (file.exists(details_path)) {
@@ -29,15 +43,32 @@ if (file.exists(details_path)) {
   details <- NULL
 }
 
-# Build player metadata lookup (join players + details)
-if (!is.null(players)) {
-  player_meta <- players
-  if (!is.null(details)) {
-    player_meta <- player_meta |>
-      left_join(details, by = "player_id")
+# Build player metadata lookup (join players + details). `details` stays
+# optional -- it only adds country/dob/style columns, so its absence degrades
+# the page rather than corrupting it.
+player_meta <- players
+if (!is.null(details)) {
+  player_meta <- player_meta |>
+    left_join(details, by = "player_id")
+}
+
+# The registry existing is not the same as it COVERING the leaderboard. A
+# player absent from it still falls back to a raw ID via coalesce(), so a
+# stale registry publishes UUIDs for exactly the newest players. Fail if more
+# than a small fraction of a table is unnamed.
+max_unnamed_frac <- 0.02
+
+report_unnamed <- function(tbl, ids, label) {
+  unnamed <- sum(!(tbl$player %in% player_meta$player_name))
+  frac <- if (nrow(tbl) > 0) unnamed / nrow(tbl) else 0
+  if (unnamed == 0) return(invisible(NULL))
+  msg <- sprintf("%s: %d of %d rows (%.1f%%) have no name in the registry",
+                 label, unnamed, nrow(tbl), 100 * frac)
+  if (frac > max_unnamed_frac) {
+    stop(msg, "\n  Refusing to publish raw player IDs. Check that ",
+         "players.parquet is current.")
   }
-} else {
-  player_meta <- NULL
+  cat(sprintf("  WARNING: %s\n", msg))
 }
 
 for (fmt in c("t20", "odi", "test")) {
@@ -57,19 +88,16 @@ for (fmt in c("t20", "odi", "test")) {
     group_by(batter_id) |>
     slice_max(batter_balls_faced, n = 1, with_ties = FALSE) |>
     ungroup() |>
-    filter(batter_balls_faced >= min_balls_batting[fmt]) |>
+    filter(batter_balls_faced >= min_balls_qualifying[fmt]) |>
     select(player_id = batter_id, scoring_index = batter_scoring_index,
            survival_rate = batter_survival_rate, balls_faced = batter_balls_faced)
 
-  if (!is.null(player_meta)) {
-    batting <- batting |>
-      left_join(player_meta, by = "player_id") |>
-      mutate(player_name = coalesce(player_name, player_id)) |>
-      select(player = player_name, country, full_name, dob, batting_style,
-             scoring_index, survival_rate, balls_faced)
-  } else {
-    batting <- batting |> rename(player = player_id)
-  }
+  batting <- batting |>
+    left_join(player_meta, by = "player_id") |>
+    mutate(player_name = coalesce(player_name, player_id)) |>
+    select(player = player_name, country, full_name, dob, batting_style,
+           scoring_index, survival_rate, balls_faced)
+  report_unnamed(batting, ps$batter_id, sprintf("%s batting", fmt))
 
   batting <- batting |> arrange(desc(scoring_index))
   write_parquet(batting, sprintf("blog/%s-batting.parquet", fmt))
@@ -79,19 +107,16 @@ for (fmt in c("t20", "odi", "test")) {
     group_by(bowler_id) |>
     slice_max(bowler_balls_bowled, n = 1, with_ties = FALSE) |>
     ungroup() |>
-    filter(bowler_balls_bowled >= min_balls_bowling[fmt]) |>
+    filter(bowler_balls_bowled >= min_balls_qualifying[fmt]) |>
     select(player_id = bowler_id, economy_index = bowler_economy_index,
            strike_rate = bowler_strike_rate, balls_bowled = bowler_balls_bowled)
 
-  if (!is.null(player_meta)) {
-    bowling <- bowling |>
-      left_join(player_meta, by = "player_id") |>
-      mutate(player_name = coalesce(player_name, player_id)) |>
-      select(player = player_name, country, full_name, dob, bowling_style,
-             economy_index, strike_rate, balls_bowled)
-  } else {
-    bowling <- bowling |> rename(player = player_id)
-  }
+  bowling <- bowling |>
+    left_join(player_meta, by = "player_id") |>
+    mutate(player_name = coalesce(player_name, player_id)) |>
+    select(player = player_name, country, full_name, dob, bowling_style,
+           economy_index, strike_rate, balls_bowled)
+  report_unnamed(bowling, ps$bowler_id, sprintf("%s bowling", fmt))
 
   bowling <- bowling |> arrange(economy_index)
   write_parquet(bowling, sprintf("blog/%s-bowling.parquet", fmt))
