@@ -40,6 +40,16 @@ jobs:
             gh release download venue_rating  -p "${fmt}_venue_skill.parquet"  -D source
           done
 
+      # Player Rating v2. Deliberately NOT continue-on-error: an unreachable
+      # release would otherwise publish a blog with the v2 tables silently
+      # missing, which looks identical to "there are no ratings".
+      - name: Download player rating v2
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+        run: |
+          gh release download player-rating-v2 -p "player_rating_v2.parquet" -D source
+          gh release download player-rating-v2 -p "player_value_v2.parquet"  -D source
+
       - name: Download player metadata
         continue-on-error: true
         env:
