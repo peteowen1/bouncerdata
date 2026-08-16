@@ -218,3 +218,69 @@ tryCatch({
 }, error = function(e) {
   warning("Failed to build player-names.parquet: ", conditionMessage(e))
 })
+
+# ---------------------------------------------------------------------------
+# Player Rating v2 (bouncerverse D-P16 to D-P29)
+#
+# The opponent- and competition-adjusted rating, covering men's and women's
+# T20 and ODI. Published straight through rather than recomputed: the parquets
+# on `player-rating-v2` are already validated at publish time (bucket
+# completeness, rank 1..N, no duplicate player per bucket, anchor players
+# where they belong), so re-deriving anything here would only add a second
+# place for it to go wrong.
+#
+# Unlike the skill tables above these already carry `player_name`, so they do
+# NOT depend on the registry join. They also carry the two columns needed to
+# read a rating honestly:
+#   average             the traditional number, for orientation
+#   effective_matches   how much evidence is behind it after decay -- a rating
+#                       whose effective_matches is below its bucket's prior is
+#                       mostly population mean, and the page should be able to
+#                       say so rather than hide it behind a filter.
+rating_v2_path <- "source/player_rating_v2.parquet"
+value_v2_path  <- "source/player_value_v2.parquet"
+
+if (file.exists(rating_v2_path)) {
+  rv <- read_parquet(rating_v2_path)
+
+  # Guard the shape rather than trusting it: this file is produced by a
+  # different repo on a different schedule, and a silently-renamed column
+  # would publish an empty table on a green run.
+  need <- c("format", "gender", "role", "rank", "player_name", "rating",
+            "average", "main_comp", "matches", "balls", "effective_matches")
+  missing <- setdiff(need, names(rv))
+  if (length(missing)) {
+    stop("player_rating_v2.parquet is missing column(s): ",
+         paste(missing, collapse = ", "),
+         "\n  Produced by bouncer's 01_build_player_ratings_v2.R; check that ",
+         "the release asset matches the current schema.")
+  }
+  if (nrow(rv) == 0L) stop("player_rating_v2.parquet is empty.")
+
+  rv <- rv |>
+    mutate(bucket = paste0(tolower(format), "-", gender)) |>
+    select(bucket, role, rank, player = player_name, rating, average,
+           main_comp, matches, balls, effective_matches, last_match, as_at) |>
+    arrange(bucket, role, rank)
+  write_parquet(rv, "blog/player-ratings-v2.parquet")
+  cat(sprintf("  ratings v2: %d rows across %d bucket-roles\n",
+              nrow(rv), dplyr::n_distinct(rv$bucket, rv$role)))
+
+  if (file.exists(value_v2_path)) {
+    vv <- read_parquet(value_v2_path) |>
+      mutate(bucket = paste0(tolower(format), "-", gender)) |>
+      select(bucket, rank, player = player_name, total_value, bat_value,
+             bowl_value, matches, bat_balls, bowl_balls, calibrated, as_at) |>
+      arrange(bucket, rank)
+    write_parquet(vv, "blog/player-values-v2.parquet")
+    cat(sprintf("  values v2:  %d rows across %d buckets\n",
+                nrow(vv), dplyr::n_distinct(vv$bucket)))
+  } else {
+    cat("  values v2:  absent, skipping (ratings still published)\n")
+  }
+} else {
+  # Not fatal: the v2 release is newer than this script's other inputs, so an
+  # older bouncerdata checkout can legitimately lack it. Loud, though -- a
+  # missing rating file must not read as "there are no ratings".
+  cat("  ratings v2: source/player_rating_v2.parquet ABSENT -- v2 tables not published\n")
+}
