@@ -248,6 +248,31 @@ if (file.exists(rating_v2_path)) {
            main_comp, matches, balls, effective_matches, last_match, as_at) |>
     arrange(bucket, role, rank)
   stopifnot(!anyNA(rv$player_id))
+
+  # Enrich from the same id-keyed crosswalk the skill tables above use, so the
+  # page can filter by country and show style badges and age without matching
+  # on names. The join is on player_id and never on the name -- which matters
+  # here more than usual, because the ids that ARE a bare name (D-P28's
+  # deliberately unmerged split careers) simply fail to match and come back
+  # NA. That is the honest outcome; a name join would instead attach one real
+  # player's country and date of birth to a different player's rating.
+  if (!is.null(player_meta) && "country" %in% names(player_meta)) {
+    before <- nrow(rv)
+    rv <- rv |>
+      left_join(
+        player_meta |>
+          select(player_id, country, full_name, dob, batting_style, bowling_style) |>
+          distinct(player_id, .keep_all = TRUE),
+        by = "player_id")
+    # A crosswalk with a duplicated player_id would silently multiply rows and
+    # break rank 1..N. distinct() above prevents it; this proves it.
+    stopifnot(nrow(rv) == before)
+    cat(sprintf("  ratings v2: %d/%d rows enriched with country\n",
+                sum(!is.na(rv$country)), nrow(rv)))
+  } else {
+    cat("  ratings v2: no player_meta available -- publishing without country/style/age\n")
+  }
+
   write_parquet(rv, "blog/player-ratings-v2.parquet")
   cat(sprintf("  ratings v2: %d rows across %d bucket-roles (%d names shared by 2+ ids)\n",
               nrow(rv), dplyr::n_distinct(rv$bucket, rv$role),
