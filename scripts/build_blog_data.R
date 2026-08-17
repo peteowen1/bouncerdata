@@ -221,8 +221,9 @@ if (file.exists(rating_v2_path)) {
   # Guard the shape rather than trusting it: this file is produced by a
   # different repo on a different schedule, and a silently-renamed column
   # would publish an empty table on a green run.
-  need <- c("format", "gender", "role", "rank", "player_name", "rating",
-            "average", "main_comp", "matches", "balls", "effective_matches")
+  need <- c("format", "gender", "role", "rank", "player_id", "player_name",
+            "rating", "average", "main_comp", "matches", "balls",
+            "effective_matches")
   missing <- setdiff(need, names(rv))
   if (length(missing)) {
     stop("player_rating_v2.parquet is missing column(s): ",
@@ -232,21 +233,36 @@ if (file.exists(rating_v2_path)) {
   }
   if (nrow(rv) == 0L) stop("player_rating_v2.parquet is empty.")
 
+  # player_id is carried even though nothing reads it yet, because `player` is
+  # NOT unique and the front-end links by it. Two bucket-roles ship two rows
+  # with the same name, and in both cases they are genuinely two different
+  # people that D-P28 deliberately refused to merge:
+  #   odi-female batter  E Jones        ids 971cb321 and "E Jones"
+  #   t20-male   bowler  Harmeet Singh  ids 0bf15e52 and 2a72fd4f
+  # Without the id the page shows a name twice and points both rows at one
+  # player. This is the find_player() lesson at the presentation layer: a name
+  # is not an identifier, and the place that discovers it is always downstream.
   rv <- rv |>
     mutate(bucket = paste0(tolower(format), "-", gender)) |>
-    select(bucket, role, rank, player = player_name, rating, average,
+    select(bucket, role, rank, player_id, player = player_name, rating, average,
            main_comp, matches, balls, effective_matches, last_match, as_at) |>
     arrange(bucket, role, rank)
+  stopifnot(!anyNA(rv$player_id))
   write_parquet(rv, "blog/player-ratings-v2.parquet")
-  cat(sprintf("  ratings v2: %d rows across %d bucket-roles\n",
-              nrow(rv), dplyr::n_distinct(rv$bucket, rv$role)))
+  cat(sprintf("  ratings v2: %d rows across %d bucket-roles (%d names shared by 2+ ids)\n",
+              nrow(rv), dplyr::n_distinct(rv$bucket, rv$role),
+              sum(rv |> count(bucket, role, player) |> pull(n) > 1)))
 
   if (file.exists(value_v2_path)) {
+    # player_id for the same reason as the rating table above: two names are
+    # shared by two different players here too.
     vv <- read_parquet(value_v2_path) |>
       mutate(bucket = paste0(tolower(format), "-", gender)) |>
-      select(bucket, rank, player = player_name, total_value, bat_value,
-             bowl_value, matches, bat_balls, bowl_balls, calibrated, as_at) |>
+      select(bucket, rank, player_id, player = player_name, total_value,
+             bat_value, bowl_value, matches, bat_balls, bowl_balls,
+             calibrated, as_at) |>
       arrange(bucket, rank)
+    stopifnot(!anyNA(vv$player_id))
     write_parquet(vv, "blog/player-values-v2.parquet")
     cat(sprintf("  values v2:  %d rows across %d buckets\n",
                 nrow(vv), dplyr::n_distinct(vv$bucket)))
