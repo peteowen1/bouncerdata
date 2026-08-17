@@ -221,9 +221,13 @@ if (file.exists(rating_v2_path)) {
   # Guard the shape rather than trusting it: this file is produced by a
   # different repo on a different schedule, and a silently-renamed column
   # would publish an empty table on a green run.
+  # Every column the select() below reads must be named here, or the guard is
+  # decorative: a column renamed upstream then fails inside dplyr::select() with
+  # "can't subset columns that don't exist" and no mention of which repo
+  # produced the file. last_match and as_at were selected but not asserted.
   need <- c("format", "gender", "role", "rank", "player_id", "player_name",
             "rating", "average", "main_comp", "matches", "balls",
-            "effective_matches")
+            "effective_matches", "last_match", "as_at")
   missing <- setdiff(need, names(rv))
   if (length(missing)) {
     stop("player_rating_v2.parquet is missing column(s): ",
@@ -279,9 +283,26 @@ if (file.exists(rating_v2_path)) {
               sum(rv |> count(bucket, role, player) |> pull(n) > 1)))
 
   if (file.exists(value_v2_path)) {
+    # Guarded the same way as the rating table, and for a sharper reason: the
+    # upload step globs blog/*.parquet unconditionally, so a present-but-empty
+    # value file would be written here and then published OVER the good copy
+    # already on R2. "Downloaded successfully" does not mean "has rows".
+    vv_raw <- read_parquet(value_v2_path)
+    vv_need <- c("format", "gender", "rank", "player_id", "player_name",
+                 "total_value", "bat_value", "bowl_value", "matches",
+                 "bat_balls", "bowl_balls", "calibrated", "as_at")
+    vv_missing <- setdiff(vv_need, names(vv_raw))
+    if (length(vv_missing)) {
+      stop("player_value_v2.parquet is missing column(s): ",
+           paste(vv_missing, collapse = ", "),
+           "\n  Produced by bouncer's 01_build_player_ratings_v2.R; check that ",
+           "the release asset matches the current schema.")
+    }
+    if (nrow(vv_raw) == 0L) stop("player_value_v2.parquet is empty.")
+
     # player_id for the same reason as the rating table above: two names are
     # shared by two different players here too.
-    vv <- read_parquet(value_v2_path) |>
+    vv <- vv_raw |>
       mutate(bucket = paste0(tolower(format), "-", gender)) |>
       select(bucket, rank, player_id, player = player_name, total_value,
              bat_value, bowl_value, matches, bat_balls, bowl_balls,
