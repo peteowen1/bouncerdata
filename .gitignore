@@ -2,11 +2,12 @@
 *.duckdb
 *.duckdb.wal
 
-# Model files
-models/*.ubj
-models/*.rds
-models/*.json
-models/*.png
+# Model files. Trained models are published to GitHub Releases via piggyback,
+# never committed -- see bouncerverse/CLAUDE.md. The previous patterns matched
+# only files directly in models/, so subdirectories (e.g. dated backups taken
+# before a retrain) showed up as untracked. Nothing under models/ has ever been
+# tracked, so ignoring the whole directory is safe and matches the intent.
+models/
 
 # Scraped data
 fox_cricket/
@@ -47,6 +48,9 @@ fox_discovered_*.rds
 *_log*.txt
 temp_*/
 *.duckdb.wal.backup
+
+# Cricinfo consolidation reports (scraper run output, regenerable)
+cricinfo_consolidation_report_*.json
 
 # One-off series discovery outputs
 scripts/series_list_*.csv
