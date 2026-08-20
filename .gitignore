@@ -75,3 +75,9 @@ source/
 
 # Local dry-run output from scripts/consolidate_cricinfo_assets.py
 cricinfo_consolidation_report_*.json
+
+# Weather cache: parquet fetched from Open-Meteo via the wheather package
+# (bouncerverse#72). Data, not code -- it belongs in a release, not in git, the
+# same as models/. Regenerable by re-running the fetch, and free to re-run
+# because the cache is checked before any API call.
+weather-cache/
