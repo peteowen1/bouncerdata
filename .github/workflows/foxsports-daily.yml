@@ -112,7 +112,26 @@ jobs:
             details = "_details"
           )
 
+          # Positive-confirmation primitive (bouncer C4 / ECOSYSTEM-FIX-PLAN.md
+          # vb_confirm_absent): fetch the actual release asset list ONCE so a
+          # failed/transient restore can be told apart from a genuinely absent
+          # asset (first run / new format). Without this, a restore failure
+          # looks identical to "no existing data", and the scrape below would
+          # rebuild all_<fmt>_*.parquet from only today's matches then upload
+          # with overwrite = TRUE — permanently wiping years of history.
+          release_assets <- tryCatch({
+            piggyback::pb_list(repo = "peteowen1/bouncerdata", tag = "foxsports")$file_name
+          }, error = function(e) {
+            cli::cli_alert_danger("Could not list foxsports release assets: {e$message}")
+            NULL
+          })
+
+          if (is.null(release_assets)) {
+            stop("Could not confirm the foxsports release asset list (transient error?) - aborting rather than risking a false 'no existing data' rebuild.")
+          }
+
           total_restored <- 0
+          restore_failures <- character(0)
 
           for (fmt in formats) {
             format_dir <- file.path(output_dir, fmt)
@@ -121,8 +140,9 @@ jobs:
             for (type_name in names(file_types)) {
               suffix <- file_types[[type_name]]
               filename <- paste0("all_", fmt, "_", type_name, ".parquet")
+              asset_exists <- filename %in% release_assets
 
-              tryCatch({
+              restored_ok <- tryCatch({
                 piggyback::pb_download(
                   filename,
                   repo = "peteowen1/bouncerdata",
@@ -131,34 +151,58 @@ jobs:
                 )
 
                 combined_path <- file.path(format_dir, filename)
-                if (!file.exists(combined_path)) next
+                if (!file.exists(combined_path)) {
+                  stop("download reported success but file is missing")
+                }
 
                 combined <- arrow::read_parquet(combined_path)
                 if (nrow(combined) == 0 || !"match_id" %in% names(combined)) {
                   file.remove(combined_path)
-                  next
-                }
+                  # An asset that EXISTS but is empty/malformed is not the same
+                  # as a genuinely absent one -- falling through silently here
+                  # is exactly the gap the tryCatch below exists to catch (a
+                  # prior truncated/partial upload, e.g.), so treat it as a
+                  # restore failure rather than "no existing data".
+                  if (asset_exists) {
+                    stop("existing asset has 0 rows or is missing 'match_id' -- refusing to treat as absent")
+                  }
+                } else {
+                  # Split combined file into individual match files
+                  match_list <- split(combined, combined$match_id)
+                  for (mid in names(match_list)) {
+                    individual_file <- file.path(format_dir, paste0(mid, suffix, ".parquet"))
+                    arrow::write_parquet(match_list[[mid]], individual_file)
+                  }
 
-                # Split combined file into individual match files
-                match_list <- split(combined, combined$match_id)
-                for (mid in names(match_list)) {
-                  individual_file <- file.path(format_dir, paste0(mid, suffix, ".parquet"))
-                  arrow::write_parquet(match_list[[mid]], individual_file)
-                }
+                  file.remove(combined_path)
 
-                file.remove(combined_path)
-
-                if (type_name == "matches") {
-                  cli::cli_alert_success("Restored {length(match_list)} {toupper(fmt)} {type_name}")
-                  total_restored <- total_restored + length(match_list)
+                  if (type_name == "matches") {
+                    cli::cli_alert_success("Restored {length(match_list)} {toupper(fmt)} {type_name}")
+                    total_restored <- total_restored + length(match_list)
+                  }
                 }
+                TRUE
               }, error = function(e) {
-                cli::cli_alert_info("No existing {type_name} for {toupper(fmt)}: {e$message}")
+                if (asset_exists) {
+                  cli::cli_alert_danger("Restore FAILED for {toupper(fmt)} {type_name} (asset exists on release): {e$message}")
+                } else {
+                  cli::cli_alert_info("No existing {type_name} for {toupper(fmt)}: {e$message}")
+                }
+                FALSE
               })
+
+              if (!isTRUE(restored_ok) && asset_exists) {
+                restore_failures <- c(restore_failures, paste0(toupper(fmt), " ", type_name))
+              }
             }
           }
 
           cli::cli_alert_success("Total: restored {total_restored} matches from previous runs")
+
+          if (length(restore_failures) > 0) {
+            cli::cli_alert_danger("Restore failed for {length(restore_failures)} asset(s) that DO exist on the release: {paste(restore_failures, collapse = ', ')}")
+            stop("Aborting: restore failure for existing release asset(s) - refusing to let downstream scrape/combine treat this as 'no existing data' and wipe history with a fresh-start rebuild. Re-run the workflow.")
+          }
         shell: Rscript {0}
         env:
           GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}

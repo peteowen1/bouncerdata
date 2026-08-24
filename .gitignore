@@ -2,11 +2,12 @@
 *.duckdb
 *.duckdb.wal
 
-# Model files
-models/*.ubj
-models/*.rds
-models/*.json
-models/*.png
+# Model files. Trained models are published to GitHub Releases via piggyback,
+# never committed -- see bouncerverse/CLAUDE.md. The previous patterns matched
+# only files directly in models/, so subdirectories (e.g. dated backups taken
+# before a retrain) showed up as untracked. Nothing under models/ has ever been
+# tracked, so ignoring the whole directory is safe and matches the intent.
+models/
 
 # Scraped data
 fox_cricket/
@@ -21,8 +22,12 @@ json_files/
 .RData
 *.Rproj.user
 
-# Claude Code
-.claude/
+# Claude Code -- local settings/session state stays untracked, but skills are
+# part of the repo's own runbook (e.g. CLAUDE.md's "Cricinfo asset cap"
+# section points at .claude/skills/consolidate-cricinfo-assets) and must ship
+# with a clone, not live only on the machine that authored them.
+.claude/*
+!.claude/skills/
 tmpclaude-*
 .Rproj.user
 
@@ -48,6 +53,9 @@ fox_discovered_*.rds
 temp_*/
 *.duckdb.wal.backup
 
+# Cricinfo consolidation reports (scraper run output, regenerable)
+cricinfo_consolidation_report_*.json
+
 # One-off series discovery outputs
 scripts/series_list_*.csv
 !scripts/series_list.csv
@@ -68,3 +76,12 @@ archive/
 # Blog data build artifacts (regenerable via build-blog-data workflow)
 blog/
 source/
+
+# Local dry-run output from scripts/consolidate_cricinfo_assets.py
+cricinfo_consolidation_report_*.json
+
+# Weather cache: parquet fetched from Open-Meteo via the wheather package
+# (bouncerverse#72). Data, not code -- it belongs in a release, not in git, the
+# same as models/. Regenerable by re-running the fetch, and free to re-run
+# because the cache is checked before any API call.
+weather-cache/

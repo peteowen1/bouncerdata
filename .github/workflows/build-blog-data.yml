@@ -12,6 +12,10 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: bouncer-r2-writer
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -42,7 +46,9 @@ jobs:
 
       # Player Rating v2. Deliberately NOT continue-on-error: an unreachable
       # release would otherwise publish a blog with the v2 tables silently
-      # missing, which looks identical to "there are no ratings".
+      # missing, which looks identical to "there are no ratings". (Same
+      # reasoning applies below to the player registry download -- see that
+      # step's own comment.)
       - name: Download player rating v2
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
@@ -50,13 +56,22 @@ jobs:
           gh release download player-rating-v2 -p "player_rating_v2.parquet" -D source
           gh release download player-rating-v2 -p "player_value_v2.parquet"  -D source
 
-      - name: Download player metadata
+      # players.parquet is REQUIRED: every blog table keys on player names, and
+      # build_blog_data.R stops the build rather than falling back to raw IDs
+      # without it. This step used to be folded into the continue-on-error
+      # download below, so a transient release failure published a live blog
+      # full of UUIDs on a green run. Only the enrichment step may fail now.
+      - name: Download player registry (required)
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+        run: gh release download cricsheet -p "players.parquet" -D source
+
+      - name: Download player enrichment (optional)
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
         run: |
-          gh release download cricsheet         -p "players.parquet"                  -D source
-          gh release download player_details   -p "bouncer_player_details.parquet"   -D source
+          gh release download player_details -p "bouncer_player_details.parquet" -D source
 
       - name: Download cricinfo balls data
         continue-on-error: true

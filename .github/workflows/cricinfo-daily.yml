@@ -52,7 +52,7 @@ permissions:
   issues: write
 
 concurrency:
-  group: cricinfo-daily
+  group: release-cricinfo
   cancel-in-progress: false
 
 jobs:
@@ -65,6 +65,34 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: dev
+
+      - name: Check cricinfo release asset-count headroom
+        run: |
+          # GitHub caps releases at 1000 assets. Per-match uploads (3 assets/match)
+          # eat headroom fast; fail loudly here, BEFORE any scraping/upload work,
+          # instead of letting per-match uploads start silently warn-and-skip near
+          # the cap (see ../../../docs/reviews/FABLE-REVIEW.md finding H7).
+          # `|| echo 0` on ANY gh failure would make a transient API error, an
+          # auth problem or a rate limit look identical to "0 assets" — walking
+          # straight past the one guard whose whole purpose is to stop us
+          # reaching the cap. Only a genuinely-absent release counts as 0.
+          if ASSET_JSON=$(gh release view cricinfo --json assets 2>"$RUNNER_TEMP/gh_err"); then
+            ASSET_COUNT=$(echo "$ASSET_JSON" | jq '.assets | length')
+          elif grep -qi "release not found" "$RUNNER_TEMP/gh_err"; then
+            ASSET_COUNT=0
+            echo "cricinfo release does not exist yet — treating as 0 assets"
+          else
+            echo "::error::could not read the cricinfo release asset count, so the cap guard cannot run. Refusing to proceed. gh said: $(cat "$RUNNER_TEMP/gh_err")"
+            exit 1
+          fi
+          echo "cricinfo release currently has $ASSET_COUNT / 1000 assets (GitHub's per-release cap)"
+          echo "- **Asset count**: $ASSET_COUNT / 1000" >> $GITHUB_STEP_SUMMARY
+          if [ "$ASSET_COUNT" -ge 950 ]; then
+            echo "::error::cricinfo release has $ASSET_COUNT assets (>= 950 threshold, GitHub's hard cap is 1000). Refusing to run to avoid silent upload failures and data loss. This needs a ONE-TIME MANUAL consolidation: run 'python scripts/consolidate_cricinfo_assets.py' (dry-run) then '--execute --yes' locally against the live release — see that script's docstring and bouncerdata/CLAUDE.md 'Cricinfo asset cap' section for the full runbook. This is a human-run step; CI will not run it for you."
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -207,6 +235,7 @@ jobs:
       - name: Upload results to release
         run: |
           UPLOADED=0
+          FAILED=0
           mkdir -p /tmp/cricinfo_upload
           for dir in t20i_male t20i_female odi_male odi_female test_male test_female; do
             DIR="cricinfo/$dir"
@@ -216,26 +245,50 @@ jobs:
                 # Prefix asset name with dir so download can sort by format_gender
                 PREFIXED="/tmp/cricinfo_upload/${dir}__$(basename "$f")"
                 cp "$f" "$PREFIXED"
-                gh release upload cricinfo "$PREFIXED" --clobber && UPLOADED=$((UPLOADED + 1)) || echo "  Warning: failed to upload $PREFIXED" >&2
+                if gh release upload cricinfo "$PREFIXED" --clobber; then
+                  UPLOADED=$((UPLOADED + 1))
+                else
+                  FAILED=$((FAILED + 1))
+                  echo "::error::Failed to upload $PREFIXED"
+                fi
               done
             fi
           done
           rm -rf /tmp/cricinfo_upload
           # Upload fixtures.parquet (top-level, not in a format subdirectory)
           if [ -f "cricinfo/fixtures.parquet" ]; then
-            gh release upload cricinfo "cricinfo/fixtures.parquet" --clobber && UPLOADED=$((UPLOADED + 1)) || echo "  Warning: failed to upload fixtures.parquet" >&2
+            if gh release upload cricinfo "cricinfo/fixtures.parquet" --clobber; then
+              UPLOADED=$((UPLOADED + 1))
+            else
+              FAILED=$((FAILED + 1))
+              echo "::error::Failed to upload fixtures.parquet"
+            fi
           fi
           # Upload combined parquets for remote R loader access
           for f in cricinfo/combined/cricinfo_*.parquet; do
             [ -f "$f" ] || continue
-            gh release upload cricinfo "$f" --clobber && UPLOADED=$((UPLOADED + 1)) || echo "  Warning: failed to upload $f" >&2
+            if gh release upload cricinfo "$f" --clobber; then
+              UPLOADED=$((UPLOADED + 1))
+            else
+              FAILED=$((FAILED + 1))
+              echo "::error::Failed to upload $f"
+            fi
           done
           TOTAL=$(find cricinfo -name "*.parquet" 2>/dev/null | wc -l)
-          echo "Uploaded $UPLOADED / $TOTAL parquet files"
+          echo "Uploaded $UPLOADED / $TOTAL parquet files ($FAILED failed)"
           echo "## Cricinfo Scrape Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Total parquet files**: $TOTAL" >> $GITHUB_STEP_SUMMARY
           echo "- **Uploaded this run**: $UPLOADED" >> $GITHUB_STEP_SUMMARY
+          echo "- **Failed this run**: $FAILED" >> $GITHUB_STEP_SUMMARY
+          # Per-file upload failures used to be warn-only (silently degrading once the
+          # release neared GitHub's 1000-asset cap — see ../../../docs/reviews/FABLE-REVIEW.md H7). Any
+          # failure now fails the job so it surfaces as a workflow failure/issue
+          # instead of a buried warning in the logs.
+          if [ "$FAILED" -gt 0 ]; then
+            echo "::error::$FAILED asset upload(s) failed this run. New/updated matches may be missing from the release; re-run the workflow after investigating (check the asset-count guard step above first)."
+            exit 1
+          fi
           if [ "$UPLOADED" -eq 0 ] && [ "$TOTAL" -gt 0 ]; then
             echo "::error::All uploads failed ($TOTAL files available but 0 uploaded)"
             exit 1
