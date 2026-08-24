@@ -22,8 +22,12 @@ json_files/
 .RData
 *.Rproj.user
 
-# Claude Code
-.claude/
+# Claude Code -- local settings/session state stays untracked, but skills are
+# part of the repo's own runbook (e.g. CLAUDE.md's "Cricinfo asset cap"
+# section points at .claude/skills/consolidate-cricinfo-assets) and must ship
+# with a clone, not live only on the machine that authored them.
+.claude/*
+!.claude/skills/
 tmpclaude-*
 .Rproj.user
 

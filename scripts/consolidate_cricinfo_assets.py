@@ -129,7 +129,14 @@ FIXTURES_NAME = "fixtures.parquet"
 
 
 def run_gh(args, **kwargs):
-    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True, **kwargs)
+    try:
+        return subprocess.run(["gh", *args], check=True, capture_output=True, text=True, **kwargs)
+    except subprocess.CalledProcessError as e:
+        # subprocess's default str(e) omits stderr, so the actual `gh` error
+        # (auth expired, rate-limited, genuine 404) never reaches the operator
+        # running this by hand during an incident.
+        print(f"ERROR: gh {' '.join(args)} failed:\n{e.stderr}", file=sys.stderr)
+        raise
 
 
 def list_release_assets(repo: str, tag: str) -> list[dict]:
@@ -204,6 +211,12 @@ def classify_assets(assets: list[dict], bundle_ids: dict, min_age_hours: int):
             if age_hours < min_age_hours:
                 skip_recent.append({"name": name, "match_id": match_id, "age_hours": round(age_hours, 1)})
                 continue
+        else:
+            # No timestamp to prove this asset is old enough to be safe from a
+            # racing scrape -- fail toward NOT deleting rather than silently
+            # skipping the recency check.
+            skip_recent.append({"name": name, "match_id": match_id, "reason": "no updated_at in API response"})
+            continue
 
         key = (fmt, gender, table)
         ids = bundle_ids.get(key)

@@ -158,6 +158,14 @@ jobs:
                 combined <- arrow::read_parquet(combined_path)
                 if (nrow(combined) == 0 || !"match_id" %in% names(combined)) {
                   file.remove(combined_path)
+                  # An asset that EXISTS but is empty/malformed is not the same
+                  # as a genuinely absent one -- falling through silently here
+                  # is exactly the gap the tryCatch below exists to catch (a
+                  # prior truncated/partial upload, e.g.), so treat it as a
+                  # restore failure rather than "no existing data".
+                  if (asset_exists) {
+                    stop("existing asset has 0 rows or is missing 'match_id' -- refusing to treat as absent")
+                  }
                 } else {
                   # Split combined file into individual match files
                   match_list <- split(combined, combined$match_id)
