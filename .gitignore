@@ -9,6 +9,13 @@
 # tracked, so ignoring the whole directory is safe and matches the intent.
 models/
 
+# Table backups taken before a destructive rebuild (backup_74/ is the D-P46
+# player-registry restore, 2026-08-20; backup_teamelo/ likewise). Same reasoning
+# as models/ above: parquet dumps of DB tables are data, published via releases
+# or regenerable from the DB, and were sitting untracked-but-not-ignored where a
+# broad `git add -A` would have committed ~32MB of them.
+backup_*/
+
 # Scraped data
 fox_cricket/
 cricinfo/
