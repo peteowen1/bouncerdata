@@ -10,6 +10,17 @@
 #   - Same surname (last token of player name)
 #   - Ranked by number of co-occurrences (2+ = confident match)
 #
+# `country` is NOT taken from cricsheet.players (that column is first-seen
+# team, so it reads club/franchise names for most players -- bouncerverse#77,
+# D-P58). It is also not sourced from cricinfo: cricinfo's own team_name has
+# the same problem, since it scrapes domestic Hawkeye competitions too (a
+# player's modal cricinfo team is often still a domestic side). Instead it is
+# derived from cricsheet.matches.team_type, which IS a genuine
+# international/club flag from the raw data -- a player's modal team across
+# matches where team_type = 'international' is their real nationality, and a
+# player with no international appearance gets NA rather than a fabricated
+# country (2026-09-01 decision, D-P63; see docs/DECISIONS.md).
+#
 # Run locally or whenever new cricinfo data is ingested.
 
 library(duckdb)
@@ -90,13 +101,46 @@ ci_meta$dob_raw <- NULL
 # Step 4: Get all cricsheet players
 cat("  Fetching cricsheet player registry...\n")
 cs_players <- dbGetQuery(con, "
-  SELECT player_id, player_name, country
+  SELECT player_id, player_name
   FROM cricsheet.players
 ")
+
+# Step 4b: Derive real nationality from international appearances (not the
+# registry's first-seen-team `country`, and not cricinfo -- see header note).
+cat("  Deriving nationality from international appearances...\n")
+nationality <- dbGetQuery(con, "
+  WITH appearances AS (
+    SELECT batter_id AS player_id, batting_team AS team
+    FROM cricsheet.deliveries d
+    JOIN cricsheet.matches m ON d.match_id = m.match_id
+    WHERE m.team_type = 'international'
+    UNION ALL
+    SELECT bowler_id AS player_id, bowling_team AS team
+    FROM cricsheet.deliveries d
+    JOIN cricsheet.matches m ON d.match_id = m.match_id
+    WHERE m.team_type = 'international'
+  ),
+  counted AS (
+    SELECT player_id, team, COUNT(*) AS n
+    FROM appearances
+    GROUP BY player_id, team
+  ),
+  ranked AS (
+    SELECT player_id, team,
+      ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY n DESC) AS rn
+    FROM counted
+  )
+  SELECT player_id, team AS country
+  FROM ranked
+  WHERE rn = 1
+")
+cat(sprintf("  Nationality resolved for %d players (%.0f%% of registry)\n",
+            nrow(nationality), 100 * nrow(nationality) / nrow(cs_players)))
 
 # Step 5: Join everything
 cat("  Joining metadata...\n")
 details <- cs_players |>
+  left_join(nationality, by = "player_id") |>
   left_join(crosswalk, by = c("player_id" = "cs_id")) |>
   left_join(ci_meta, by = "ci_id") |>
   transmute(
@@ -113,7 +157,9 @@ details <- cs_players |>
 n_enriched <- sum(!is.na(details$full_name))
 n_dob <- sum(!is.na(details$dob))
 n_bat <- sum(!is.na(details$batting_style))
+n_country <- sum(!is.na(details$country))
 cat(sprintf("  Total players: %d\n", nrow(details)))
+cat(sprintf("  With real nationality: %d (%.0f%%)\n", n_country, 100 * n_country / nrow(details)))
 cat(sprintf("  With cricinfo enrichment: %d (%.0f%%)\n", n_enriched, 100 * n_enriched / nrow(details)))
 cat(sprintf("  With DOB: %d | Batting style: %d\n", n_dob, n_bat))
 
