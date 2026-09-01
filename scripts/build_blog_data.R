@@ -346,3 +346,73 @@ if (file.exists(rating_v2_path)) {
   # missing rating file must not read as "there are no ratings".
   cat("  ratings v2: source/player_rating_v2.parquet ABSENT -- v2 tables not published\n")
 }
+
+# ---------------------------------------------------------------------------
+# Player Rating TSA (bouncerverse D-P51)
+#
+# A separate, lambda-free lens on the same rating-v2 pipeline: prices a
+# wicket by its effect on the match's own projected-final-score curve
+# instead of a flat lambda. Alongside player-ratings-v2, not replacing it --
+# Pete's call. Same non-recompute philosophy as v2 above: the parquet on
+# `player-rating-tsa` is already anchor-checked at publish time
+# (02_build_player_ratings_tsa.R in bouncer), so re-deriving anything here
+# would only add a second place for it to go wrong.
+#
+# Same schema shape as player_rating_v2 (store_player_rating_v2() writes both
+# through .rating_v2_schema), so this block mirrors that one closely -- but
+# t20/odi only, no Test bucket (TSA has no fixed ball allocation to project
+# against in Test), and no value-table analogue yet.
+rating_tsa_path <- "source/player_rating_tsa.parquet"
+
+if (file.exists(rating_tsa_path)) {
+  rt <- read_parquet(rating_tsa_path)
+
+  need <- c("format", "gender", "role", "rank", "player_id", "player_name",
+            "rating", "average", "main_comp", "matches", "balls",
+            "effective_matches", "last_match", "as_at")
+  missing <- setdiff(need, names(rt))
+  if (length(missing)) {
+    stop("player_rating_tsa.parquet is missing column(s): ",
+         paste(missing, collapse = ", "),
+         "\n  Produced by bouncer's 02_build_player_ratings_tsa.R; check that ",
+         "the release asset matches the current schema.")
+  }
+  if (nrow(rt) == 0L) stop("player_rating_tsa.parquet is empty.")
+  if (any(rt$format == "TEST")) {
+    stop("player_rating_tsa.parquet carries Test rows -- TSA has no fixed ",
+         "ball allocation to project against in Test; this should be ",
+         "structurally impossible. Check 02_build_player_ratings_tsa.R.")
+  }
+
+  # Same player_id caveat as v2 above: `player` is not unique, and the
+  # front-end links by id.
+  rt <- rt |>
+    mutate(bucket = paste0(tolower(format), "-", gender)) |>
+    select(bucket, role, rank, player_id, player = player_name, rating, average,
+           main_comp, matches, balls, effective_matches, last_match, as_at) |>
+    arrange(bucket, role, rank)
+  stopifnot(!anyNA(rt$player_id))
+
+  if (!is.null(player_meta) && "country" %in% names(player_meta)) {
+    before <- nrow(rt)
+    rt <- rt |>
+      left_join(
+        player_meta |>
+          select(player_id, country, full_name, dob, batting_style, bowling_style) |>
+          distinct(player_id, .keep_all = TRUE),
+        by = "player_id")
+    stopifnot(nrow(rt) == before)
+    cat(sprintf("  ratings tsa: %d/%d rows enriched with country\n",
+                sum(!is.na(rt$country)), nrow(rt)))
+  } else {
+    cat("  ratings tsa: no player_meta available -- publishing without country/style/age\n")
+  }
+
+  write_parquet(rt, "blog/player-rating-tsa.parquet")
+  cat(sprintf("  ratings tsa: %d rows across %d bucket-roles\n",
+              nrow(rt), dplyr::n_distinct(rt$bucket, rt$role)))
+} else {
+  # Not fatal, same reasoning as v2 above -- TSA is newer than this script's
+  # other inputs.
+  cat("  ratings tsa: source/player_rating_tsa.parquet ABSENT -- TSA table not published\n")
+}
