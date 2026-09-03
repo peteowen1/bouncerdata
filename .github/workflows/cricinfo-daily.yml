@@ -190,10 +190,27 @@ jobs:
           # combined/ is deliberately EXCLUDED: those 18 bundles are what
           # bouncer::load_cricinfo_remote() actually reads, they are rebuilt every
           # run, and they are cheap. Always re-upload them.
-          find cricinfo -name '*.parquet' -type f -not -path 'cricinfo/combined/*' -print0 2>/dev/null \
-            | xargs -0 -r md5sum 2>/dev/null | sort > /tmp/cricinfo_restored.md5 || true
-          touch /tmp/cricinfo_restored.md5
-          echo "Recorded $(wc -l < /tmp/cricinfo_restored.md5) checksums for unchanged-file detection"
+          # Count what SHOULD be hashed independently of the hashing pipeline, so a
+          # failure of the pipeline itself is distinguishable from "there was
+          # genuinely nothing to hash". Without this the two look identical and the
+          # optimisation silently reverts to re-uploading everything -- the exact
+          # bug this manifest exists to fix, reintroduced invisibly.
+          RESTORABLE=$(find cricinfo -name '*.parquet' -type f -not -path 'cricinfo/combined/*' | wc -l)
+          : > /tmp/cricinfo_restored.md5
+          MANIFEST_OK=true
+          if [ "$RESTORABLE" -gt 0 ]; then
+            find cricinfo -name '*.parquet' -type f -not -path 'cricinfo/combined/*' -print0 \
+              | xargs -0 -r md5sum | sort > /tmp/cricinfo_restored.md5 || MANIFEST_OK=false
+          fi
+          HASHED=$(wc -l < /tmp/cricinfo_restored.md5)
+          echo "Recorded $HASHED checksums for unchanged-file detection ($RESTORABLE restorable files)"
+          if [ "$MANIFEST_OK" != "true" ] || [ "$HASHED" -ne "$RESTORABLE" ]; then
+            # Not fatal: an empty/partial manifest only means more files get
+            # re-uploaded than necessary, which is the old behaviour and is safe.
+            # But it must be visible, because the symptom otherwise is a silent
+            # return to churning every asset daily.
+            echo "::warning::Checksum manifest is incomplete ($HASHED of $RESTORABLE files hashed). Unchanged-asset skipping will be partially or fully disabled this run, so the release asset count and updatedAt churn may regress. See bouncerverse#84 / D-P64."
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

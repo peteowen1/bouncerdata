@@ -58,8 +58,13 @@ crosswalk <- dbGetQuery(con, "
     GROUP BY cb.batter_id, ci.player_id
   ),
   ranked AS (
+    -- `ci_id` is the explicit tiebreaker: without it, a cricsheet player who
+    -- matches two cricinfo ids on the same number of shared matches is assigned
+    -- one of them arbitrarily and differently on each run, which changes their
+    -- name/DOB/style enrichment AND their fallback nationality. Same defect
+    -- class as the two ranking queries below.
     SELECT cs_id, ci_id, shared_matches,
-      ROW_NUMBER() OVER (PARTITION BY cs_id ORDER BY shared_matches DESC) AS rn
+      ROW_NUMBER() OVER (PARTITION BY cs_id ORDER BY shared_matches DESC, ci_id ASC) AS rn
     FROM raw_matches
   )
   SELECT cs_id, ci_id, shared_matches
@@ -110,8 +115,10 @@ cs_players <- dbGetQuery(con, "
 # player against registry$people. They carry no deliveries and no metadata, but
 # 3,281 of them duplicate a REAL player's name, so anything that displays or
 # looks up by name gets a phantom twin. The permanent fix is the scoped delete
-# in data-raw/data-acquisition/delete_orphan_player_names.R (written, tested,
-# not yet run); this filter keeps them out of the published artefact meanwhile.
+# in the SIBLING REPO at bouncer/data-raw/data-acquisition/delete_orphan_player_names.R
+# (written, tested, not yet run) -- bouncerdata has no data-raw/ of its own, so
+# the path needs the repo prefix to be findable from here. This filter keeps them
+# out of the published artefact meanwhile.
 n_before <- nrow(cs_players)
 cs_players <- cs_players[cs_players$player_id != cs_players$player_name, , drop = FALSE]
 n_junk <- n_before - nrow(cs_players)
@@ -133,19 +140,25 @@ cat("  Deriving nationality from international appearances...\n")
 # that as his country at rank 3 of the T20 male board. He now falls to NA, which
 # is honest -- the Afghan players are unfixable from this source, not mislabelled.
 COMPOSITE_SIDES <- c("ICC World XI", "Asia XI", "Africa XI")
-nationality <- dbGetQuery(con, "
+# Single source of truth: build the SQL IN-list FROM the R constant rather than
+# repeating the literals. They were duplicated in three queries, which meant the
+# "leaked" assertion below could only ever catch a typo between the copies.
+.composite_sql <- paste0(
+  "(", paste(sprintf("'%s'", gsub("'", "''", COMPOSITE_SIDES)), collapse = ", "), ")")
+
+nationality <- dbGetQuery(con, sprintf("
   WITH appearances AS (
     SELECT batter_id AS player_id, batting_team AS team
     FROM cricsheet.deliveries d
     JOIN cricsheet.matches m ON d.match_id = m.match_id
     WHERE m.team_type = 'international'
-      AND d.batting_team NOT IN ('ICC World XI', 'Asia XI', 'Africa XI')
+      AND d.batting_team NOT IN %1$s
     UNION ALL
     SELECT bowler_id AS player_id, bowling_team AS team
     FROM cricsheet.deliveries d
     JOIN cricsheet.matches m ON d.match_id = m.match_id
     WHERE m.team_type = 'international'
-      AND d.bowling_team NOT IN ('ICC World XI', 'Asia XI', 'Africa XI')
+      AND d.bowling_team NOT IN %1$s
   ),
   counted AS (
     SELECT player_id, team, COUNT(*) AS n
@@ -153,28 +166,31 @@ nationality <- dbGetQuery(con, "
     GROUP BY player_id, team
   ),
   ranked AS (
+    -- `team` is the explicit tiebreaker. Without it this ORDER BY is
+    -- non-deterministic on ties and the published file changes between runs
+    -- (measured: five builds, five different md5s, via the cricinfo fallback
+    -- query which had the same defect). 0 players are currently tied here, but
+    -- that is a property of today's data, not a guarantee.
     SELECT player_id, team,
-      ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY n DESC) AS rn
+      ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY n DESC, team ASC) AS rn
     FROM counted
   )
   SELECT player_id, team AS country
   FROM ranked
   WHERE rn = 1
-")
+", .composite_sql))
 cat(sprintf("  Nationality resolved for %d players (%.0f%% of registry)\n",
             nrow(nationality), 100 * nrow(nationality) / nrow(cs_players)))
 
-# Guard: a composite side must never reach the country column. If cricsheet adds
-# another one (a new World XI fixture), fail loudly here rather than publish it
-# as somebody's nationality.
-leaked <- intersect(unique(nationality$country), COMPOSITE_SIDES)
-if (length(leaked)) {
-  stop("Composite side leaked into country: ", paste(leaked, collapse = ", "))
-}
-suspect <- grep("XI$|World|ICC", unique(nationality$country), value = TRUE)
-if (length(suspect)) {
-  warning("country values that look like composite sides, not nations: ",
-          paste(suspect, collapse = ", "))
+# The whole nationality step is one predicate away from silently producing
+# nothing: everything below keys off `m.team_type = 'international'`, and if that
+# value is ever renamed or recased upstream the query returns zero rows without
+# erroring, `country` lands 100% NA, and the file still publishes. That is the
+# failure this repo has already shipped once (a column present, correctly typed
+# and 0% populated for months). Fail here instead.
+if (!nrow(nationality)) {
+  stop("Nationality query returned 0 rows -- check that cricsheet.matches.team_type ",
+       "still uses the value 'international'. Refusing to publish an empty country column.")
 }
 
 # Step 4c: fall back to cricinfo for nationalities cricsheet cannot supply.
@@ -192,30 +208,48 @@ if (length(suspect)) {
 # plus Afghanistan (which by construction can never appear in a cricsheet-derived
 # set). A franchise name cannot pass that filter.
 #
-# Deliberately narrow: this fills 20 players, 13 of them Afghan. It is not a
-# general enrichment path, it is a patch for nations missing at source.
-national_sides <- dbGetQuery(con, "
+# Deliberately narrow: it is not a general enrichment path, it is a patch for
+# nations missing at source. The count it fills is logged at runtime rather than
+# quoted here, because it moves as cricinfo coverage grows.
+national_sides <- dbGetQuery(con, sprintf("
   SELECT DISTINCT team FROM (
     SELECT team1 AS team FROM cricsheet.matches WHERE team_type = 'international'
     UNION ALL
     SELECT team2 AS team FROM cricsheet.matches WHERE team_type = 'international'
-  ) WHERE team NOT IN ('ICC World XI', 'Asia XI', 'Africa XI')
-")$team
+  ) WHERE team NOT IN %s
+", .composite_sql))$team
 national_sides <- union(national_sides, "Afghanistan")
 
-ci_nationality <- dbGetQuery(con, "
-  WITH counted AS (
-    SELECT player_id AS ci_id, team_name, COUNT(*) AS n
-    FROM cricinfo.innings GROUP BY 1, 2
-  ),
-  ranked AS (
-    SELECT ci_id, team_name, n,
-      ROW_NUMBER() OVER (PARTITION BY ci_id ORDER BY n DESC) AS rn
-    FROM counted
-  )
-  SELECT ci_id, team_name AS ci_country FROM ranked WHERE rn = 1
+# Filter to national sides BEFORE ranking, not after, and break ties explicitly.
+#
+# The previous shape (rank every cricinfo team by appearances, take the modal
+# one, THEN drop it if it is not a national side) had two faults, both found by
+# running this script three times and getting three different files:
+#
+#   1. NON-DETERMINISM. `ROW_NUMBER() OVER (... ORDER BY n DESC)` has no
+#      tiebreaker, and 423 of 9,326 cricinfo players (4.5%) are tied at the top.
+#      DuckDB resolved those ties differently on each run, so the published
+#      artefact varied run to run -- measured at 20/21/22/23/24 fallback players
+#      across five builds, with the country mix changing too. The main cricsheet
+#      nationality query has 0 ties today, but it gets the same explicit
+#      tiebreaker below, because "no ties" is a property of today's data, not a
+#      guarantee.
+#
+#   2. IT ASKED THE WRONG QUESTION. Ranking first meant a player whose modal
+#      cricinfo team is their franchise got NO country even when they had plenty
+#      of national appearances -- the tie decided whether they were represented
+#      at all. The question here is "does cricinfo show a national side for this
+#      player", so restrict to national sides and take the modal one of those.
+#      Age-group and A sides ("Afghanistan Under-19s", "Afghanistan A") are not
+#      in national_sides, so they are excluded by the same filter.
+ci_counts <- dbGetQuery(con, "
+  SELECT player_id AS ci_id, team_name, COUNT(*) AS n
+  FROM cricinfo.innings GROUP BY 1, 2
 ")
-ci_nationality <- ci_nationality[ci_nationality$ci_country %in% national_sides, , drop = FALSE]
+ci_counts <- ci_counts[ci_counts$team_name %in% national_sides, , drop = FALSE]
+ci_counts <- ci_counts[order(ci_counts$ci_id, -ci_counts$n, ci_counts$team_name), ]
+ci_nationality <- ci_counts[!duplicated(ci_counts$ci_id), c("ci_id", "team_name")]
+names(ci_nationality)[names(ci_nationality) == "team_name"] <- "ci_country"
 
 fallback <- merge(crosswalk[, c("cs_id", "ci_id")], ci_nationality, by = "ci_id")
 fallback <- fallback[!fallback$cs_id %in% nationality$player_id, , drop = FALSE]
@@ -232,6 +266,42 @@ if (nrow(fallback)) {
   )
 }
 stopifnot(!anyDuplicated(nationality$player_id))
+
+# Validate the FINAL country set -- after the cricinfo fallback has merged in,
+# not before it. The earlier version of this ran before the rbind above, so
+# fallback-sourced countries were never checked at all.
+#
+# Two separate checks, because they catch different things:
+#
+#   `leaked` is only an assertion that the SQL exclusion above did its job. It
+#   cannot catch a NEW invitational side, because it compares against the very
+#   list the query already excluded. That is all it claims to be.
+#
+#   `suspect` is the one that actually protects against a new World XI-type
+#   fixture, which is the real risk -- cricsheet withholding Afghanistan is what
+#   made a 33-delivery ICC World XI stint Rashid Khan's modal international team
+#   in the first place, and nothing stops a future "Cricket All-Stars" or
+#   "World Select XI" doing the same to somebody else. It is a stop(), not a
+#   warning(): publishing a made-up nationality on a leaderboard is worse than
+#   failing a build. Verified against all 108 real country values in the corpus
+#   on 2026-09-03 -- none of them match this pattern, so it cannot fire
+#   spuriously on a genuine nation.
+leaked <- intersect(unique(nationality$country), COMPOSITE_SIDES)
+if (length(leaked)) {
+  stop("Composite side survived the SQL exclusion: ", paste(leaked, collapse = ", "),
+       " -- the NOT IN filter is not working.")
+}
+suspect <- setdiff(
+  grep("\\bXI\\b|World|Invitation|Select|Combined|ICC", unique(nationality$country),
+       value = TRUE),
+  COMPOSITE_SIDES)
+if (length(suspect)) {
+  stop("Country value(s) look like a composite/invitational side, not a nation: ",
+       paste(suspect, collapse = ", "),
+       "\n  If this is a real nation, widen the pattern. If it is an invitational ",
+       "side, add it to COMPOSITE_SIDES -- it must not be published as anyone's ",
+       "nationality.")
+}
 
 # Step 5: Join everything
 cat("  Joining metadata...\n")
@@ -258,6 +328,34 @@ cat(sprintf("  Total players: %d\n", nrow(details)))
 cat(sprintf("  With real nationality: %d (%.0f%%)\n", n_country, 100 * n_country / nrow(details)))
 cat(sprintf("  With cricinfo enrichment: %d (%.0f%%)\n", n_enriched, 100 * n_enriched / nrow(details)))
 cat(sprintf("  With DOB: %d | Batting style: %d\n", n_dob, n_bat))
+
+# Coverage floor, not a presence check. `country` can be present, correctly typed
+# and 0% populated while every other check in this script passes -- and this
+# artefact in particular went six months without a rebuild (bouncerdata#70), so a
+# collapse here would sit unnoticed and feed straight into build_blog_data.R's
+# player_meta join, which also only tests for the column's presence.
+#
+# Floor is deliberately well below the observed value rather than near it: 65.8%
+# on 2026-09-03 (8,501 of 12,915). 40% leaves room for the genuine drift of more
+# uncapped domestic players entering the registry, while still catching the
+# failure mode that matters, which is a collapse toward zero rather than a slow
+# decline.
+MIN_COUNTRY_COVERAGE <- 0.40
+if (n_country < MIN_COUNTRY_COVERAGE * nrow(details)) {
+  stop(sprintf(
+    paste0("country coverage collapsed to %.1f%% (%d of %d), below the %.0f%% floor ",
+           "-- refusing to publish. Check cricsheet.matches.team_type and the ",
+           "cricinfo fallback's national_sides list before overriding this."),
+    100 * n_country / nrow(details), n_country, nrow(details),
+    100 * MIN_COUNTRY_COVERAGE))
+}
+
+# Sort before writing. DuckDB does not guarantee row order, so without this the
+# same data lands in a different order on each run and the published artefact's
+# bytes change even when nothing about its content did -- which makes
+# "did this actually change?" unanswerable by checksum, both for a human and for
+# the cricinfo-daily unchanged-asset check.
+details <- details[order(details$player_id), , drop = FALSE]
 
 write_parquet(details, "blog/bouncer_player_details.parquet")
 cat("  Written: blog/bouncer_player_details.parquet\n")
