@@ -62,6 +62,19 @@ RELEASE_CONFIG <- list(
     dir = file.path(PARQUET_DIR, "venue_rating"),
     pattern = "\\.parquet$",
     description = "Per-delivery venue skill indices for all formats (T20, ODI, Test)"
+  ),
+  # Added 2026-09-03 (bouncerdata#70). This release had no config entry at all --
+  # it was uploaded by hand once on 2026-03-03 and then went six months without a
+  # rebuild, while build-blog-data.yml kept downloading it. A code fix to
+  # build_player_details.R (D-P63, nationality) shipped and changed nothing live
+  # because nothing ever republished the asset. Rebuild with
+  # scripts/build_player_details.R, then RELEASE_TYPE=player_details here.
+  "player_details" = list(
+    tag = "player_details",
+    name = "Player Details",
+    dir = "blog",
+    pattern = "^bouncer_player_details\\.parquet$",
+    description = "Player registry with derived nationality, DOB and batting/bowling styles"
   )
 )
 
