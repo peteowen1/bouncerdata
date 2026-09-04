@@ -359,9 +359,23 @@ if (file.exists(rating_v2_path)) {
 # would only add a second place for it to go wrong.
 #
 # Same schema shape as player_rating_v2 (store_player_rating_v2() writes both
-# through .rating_v2_schema), so this block mirrors that one closely -- but
-# t20/odi only, no Test bucket (TSA has no fixed ball allocation to project
-# against in Test), and no value-table analogue yet.
+# through .rating_v2_schema), so this block mirrors that one closely, all
+# formats -- no value-table analogue yet, that's the only difference.
+#
+# Test WAS excluded here on the reasoning that TSA has no fixed ball
+# allocation to project against in Test. That reasoning no longer holds:
+# bouncer `dev` c/e171cca (2026-09-04, bouncerverse D-P65) shipped a two-stage
+# expected-overs projection specifically to give Test TSA a real rating, and
+# it is now live and anchor-checked (`test`/`male` in main.player_rating_tsa,
+# same check_anchor() gate every other bucket already passes through
+# 02_build_player_ratings_tsa.R). The hard stop() this block used to have on
+# any Test row would abort the WHOLE build the first time this release
+# republishes with Test data in it -- removed rather than left to fire.
+#
+# `format='TEST'` rows here still are NOT wired into the cricket frontend
+# (cricket/player-ratings.qmd's slice() calls only cover t20/odi buckets) --
+# publishing them here is safe (unused rows, nothing reads them) but does not
+# by itself put Test on the site. That is a separate frontend change.
 rating_tsa_path <- "source/player_rating_tsa.parquet"
 
 if (file.exists(rating_tsa_path)) {
@@ -378,11 +392,6 @@ if (file.exists(rating_tsa_path)) {
          "the release asset matches the current schema.")
   }
   if (nrow(rt) == 0L) stop("player_rating_tsa.parquet is empty.")
-  if (any(rt$format == "TEST")) {
-    stop("player_rating_tsa.parquet carries Test rows -- TSA has no fixed ",
-         "ball allocation to project against in Test; this should be ",
-         "structurally impossible. Check 02_build_player_ratings_tsa.R.")
-  }
 
   # Same player_id caveat as v2 above: `player` is not unique, and the
   # front-end links by id.
