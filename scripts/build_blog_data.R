@@ -52,11 +52,21 @@ if (file.exists(details_path)) {
 
 # Build player metadata lookup (join players + details). `details` stays
 # optional -- it only adds country/dob/style columns, so its absence degrades
-# the page rather than corrupting it.
+# the page rather than corrupting it. That degrade only actually holds if
+# player_meta always has those columns to select downstream -- caught by
+# review (#66): a NULL `details` (missing OR unreadable) used to leave
+# player_meta without country/full_name/dob/batting_style/bowling_style, and
+# the batting/bowling select() blocks below reference those names
+# unconditionally, so the "degrades gracefully" claim was false -- it still
+# crashed a few lines later with a confusing "column doesn't exist" error.
+# Pad with NA columns here, once, so every downstream reference is safe.
+detail_cols <- c("country", "full_name", "dob", "batting_style", "bowling_style")
 player_meta <- players
 if (!is.null(details)) {
   player_meta <- player_meta |>
     left_join(details, by = "player_id")
+} else {
+  player_meta[detail_cols] <- NA_character_
 }
 
 # The registry existing is not the same as it COVERING the leaderboard. A
