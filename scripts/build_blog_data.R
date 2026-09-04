@@ -34,10 +34,17 @@ if (nrow(players) == 0) {
 }
 
 if (file.exists(details_path)) {
-  details <- read_parquet(details_path) |>
-    select(player_id, country, full_name, dob, batting_style, bowling_style)
-  cat(sprintf("Loaded player details: %d players (%d enriched)\n",
-              nrow(details), sum(!is.na(details$full_name))))
+  details <- tryCatch({
+    d <- read_parquet(details_path) |>
+      select(player_id, country, full_name, dob, batting_style, bowling_style)
+    cat(sprintf("Loaded player details: %d players (%d enriched)\n",
+                nrow(d), sum(!is.na(d$full_name))))
+    d
+  }, error = function(e) {
+    warning("bouncer_player_details.parquet exists but failed to read (",
+            conditionMessage(e), ") — no enrichment")
+    NULL
+  })
 } else {
   warning("bouncer_player_details.parquet not found — no enrichment")
   details <- NULL
@@ -69,6 +76,10 @@ report_unnamed <- function(tbl, ids, label) {
          "players.parquet is current.")
   }
   cat(sprintf("  WARNING: %s\n", msg))
+  summary_file <- Sys.getenv("GITHUB_STEP_SUMMARY")
+  if (nzchar(summary_file)) {
+    cat(sprintf("- **WARNING**: %s\n", msg), file = summary_file, append = TRUE)
+  }
 }
 
 for (fmt in c("t20", "odi", "test")) {
