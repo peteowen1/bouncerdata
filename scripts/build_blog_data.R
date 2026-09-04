@@ -34,10 +34,17 @@ if (nrow(players) == 0) {
 }
 
 if (file.exists(details_path)) {
-  details <- read_parquet(details_path) |>
-    select(player_id, country, full_name, dob, batting_style, bowling_style)
-  cat(sprintf("Loaded player details: %d players (%d enriched)\n",
-              nrow(details), sum(!is.na(details$full_name))))
+  details <- tryCatch({
+    d <- read_parquet(details_path) |>
+      select(player_id, country, full_name, dob, batting_style, bowling_style)
+    cat(sprintf("Loaded player details: %d players (%d enriched)\n",
+                nrow(d), sum(!is.na(d$full_name))))
+    d
+  }, error = function(e) {
+    warning("bouncer_player_details.parquet exists but failed to read (",
+            conditionMessage(e), ") — no enrichment")
+    NULL
+  })
 } else {
   warning("bouncer_player_details.parquet not found — no enrichment")
   details <- NULL
@@ -45,11 +52,21 @@ if (file.exists(details_path)) {
 
 # Build player metadata lookup (join players + details). `details` stays
 # optional -- it only adds country/dob/style columns, so its absence degrades
-# the page rather than corrupting it.
+# the page rather than corrupting it. That degrade only actually holds if
+# player_meta always has those columns to select downstream -- caught by
+# review (#66): a NULL `details` (missing OR unreadable) used to leave
+# player_meta without country/full_name/dob/batting_style/bowling_style, and
+# the batting/bowling select() blocks below reference those names
+# unconditionally, so the "degrades gracefully" claim was false -- it still
+# crashed a few lines later with a confusing "column doesn't exist" error.
+# Pad with NA columns here, once, so every downstream reference is safe.
+detail_cols <- c("country", "full_name", "dob", "batting_style", "bowling_style")
 player_meta <- players
 if (!is.null(details)) {
   player_meta <- player_meta |>
     left_join(details, by = "player_id")
+} else {
+  player_meta[detail_cols] <- NA_character_
 }
 
 # The registry existing is not the same as it COVERING the leaderboard. A
@@ -69,6 +86,10 @@ report_unnamed <- function(tbl, ids, label) {
          "players.parquet is current.")
   }
   cat(sprintf("  WARNING: %s\n", msg))
+  summary_file <- Sys.getenv("GITHUB_STEP_SUMMARY")
+  if (nzchar(summary_file)) {
+    cat(sprintf("- **WARNING**: %s\n", msg), file = summary_file, append = TRUE)
+  }
 }
 
 for (fmt in c("t20", "odi", "test")) {
