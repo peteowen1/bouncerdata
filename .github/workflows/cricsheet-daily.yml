@@ -372,14 +372,65 @@ jobs:
                 return(FALSE)
               }
 
+              # Checked on new_df itself, BEFORE merging -- checking the
+              # post-dedup `combined` here instead is tautological (filtering
+              # with !duplicated() and then re-checking duplicated() on the
+              # result is guaranteed zero) and would never fire on the
+              # ordinary incremental-sync path where existing_file exists,
+              # which is the branch this guard most needs to cover: two
+              # source files somehow producing the same key in one day's
+              # batch, before that batch ever reaches the existing release
+              # data.
+              if (!is.null(key_col)) {
+                missing_from_new <- setdiff(key_col, names(new_df))
+                if (length(missing_from_new) > 0) {
+                  stop(sprintf(
+                    "merge_and_write(%s): key column(s) %s missing from the new batch -- refusing to write. Columns present: %s",
+                    filename, paste(missing_from_new, collapse = ", "), paste(names(new_df), collapse = ", ")))
+                }
+                n_dup_new <- sum(duplicated(new_df[key_col]))
+                if (n_dup_new > 0) {
+                  stop(sprintf(
+                    "merge_and_write(%s): %d row(s) in the new batch share a key (%s) before merging -- refusing to write.",
+                    filename, n_dup_new, paste(key_col, collapse = ", ")))
+                }
+              }
+
               if (file.exists(existing_file)) {
                 existing_df <- arrow::read_parquet(existing_file)
+
+                # Checked on existing_df BEFORE bind_rows(), not after --
+                # bind_rows() fills a genuinely MISSING column with NA rather
+                # than erroring, so a key column absent from existing_df is
+                # indistinguishable from "present but NA" once combined exists.
+                # A check against `combined` (the previous version of this
+                # guard) could therefore never fire for this case, and this is
+                # exactly the schema-drift scenario bouncerverse#63 was
+                # written to catch, so it needs its own check pre-bind.
+                #
+                # bouncerdata#63: this used to silently no-op whenever any key
+                # column was missing (schema drift the harmonize/bind_rows
+                # step wouldn't itself catch) -- the file still got written
+                # and uploaded, un-deduplicated, with nothing recording that
+                # the dedup step never ran. Measured live on 2026-08-25:
+                # matches.parquet on the release is 50,799 rows for 22,393
+                # distinct match_id (2.27x), and growing since #63 was first
+                # measured at 2.07x on 2026-08-16 -- so this genuinely keeps
+                # recurring, not a one-off. Missing key columns now abort the
+                # whole run instead of silently publishing undeduplicated data.
+                if (!is.null(key_col)) {
+                  missing_keys <- setdiff(key_col, names(existing_df))
+                  if (length(missing_keys) > 0) {
+                    stop(sprintf(
+                      "merge_and_write(%s): key column(s) %s missing from the existing release file -- refusing to write undeduplicated data. Columns present: %s",
+                      filename, paste(missing_keys, collapse = ", "), paste(names(existing_df), collapse = ", ")))
+                  }
+                }
+
                 # bind_rows handles mismatched columns gracefully (fills with NA)
                 combined <- dplyr::bind_rows(harmonize_types(list(existing_df, new_df)))
 
-                # Deduplicate if key column(s) provided (key_col may be a
-                # composite key, e.g. c("match_id", "innings"))
-                if (!is.null(key_col) && all(key_col %in% names(combined))) {
+                if (!is.null(key_col)) {
                   combined <- combined[!duplicated(combined[key_col]), ]
                 }
               } else {

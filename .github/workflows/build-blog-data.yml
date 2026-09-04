@@ -56,6 +56,15 @@ jobs:
           gh release download player-rating-v2 -p "player_rating_v2.parquet" -D source
           gh release download player-rating-v2 -p "player_value_v2.parquet"  -D source
 
+      # Player Rating TSA (D-P51). Same "not continue-on-error" reasoning as
+      # v2 above -- an unreachable release should fail loudly, not silently
+      # publish a blog with the TSA table missing.
+      - name: Download player rating TSA
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+        run: |
+          gh release download player-rating-tsa -p "player_rating_tsa.parquet" -D source
+
       # players.parquet is REQUIRED: every blog table keys on player names, and
       # build_blog_data.R stops the build rather than falling back to raw IDs
       # without it. This step used to be folded into the continue-on-error

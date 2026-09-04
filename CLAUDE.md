@@ -10,33 +10,7 @@ Verse-level docs (reviews, plans, decision log, work queue) live in `../CLAUDE.m
 
 ## Directory Structure
 
-```
-bouncerdata/
-├── .github/workflows/     <- cricsheet-daily.yml, foxsports-daily.yml, cricinfo-daily.yml, build-blog-data.yml
-├── scripts/               <- Local scripts (R, Python, shell)
-│   ├── cricinfo_scraper.py       <- Cricinfo Python scraper (Playwright + stealth)
-│   ├── combine_cricinfo_parquets.py <- Merge per-match → format-level combined parquets
-│   ├── kill_scrapers.py          <- Kill all scraper processes + Playwright Chrome
-│   ├── discover_series.py        <- Auto-discover new series from Cricinfo schedule pages
-│   ├── series_cache.py           <- Series caching utility
-│   ├── run_scraper.sh            <- Shell wrapper (ensures Chrome cleanup on kill)
-│   ├── series_list.csv           <- Series to scrape (format, name, URL per series)
-│   ├── build_blog_data.R         <- Build data for blog/website
-│   └── oracle_vm/                <- VM deployment script (migrate_partitions.R)
-├── bouncer.duckdb         <- Main database (~18GB, gitignored)
-├── models/                <- Trained XGBoost models (.ubj/.rds, gitignored)
-├── cricinfo/              <- Cricinfo scraped data (gitignored)
-│   ├── {format}_{gender}/ <- Per-match tables: *_balls.parquet, *_match.parquet, *_innings.parquet
-│   └── _archive/          <- Old scraper data (commentary, rich)
-├── fox_cricket/           <- Fox Sports scraped data (gitignored)
-├── json_files/            <- Raw Cricsheet JSON (gitignored, re-downloadable)
-├── parquet/               <- Exported parquet files for releases
-├── source/                <- Source skill/player parquets feeding blog data builds
-├── blog/                  <- Aggregated leaderboard/ranking parquets for blog/website
-├── manifests/             <- Cricsheet manifest files
-├── checkpoints/           <- Pipeline checkpoint files
-└── temp_*/                <- Temporary working directories (gitignored)
-```
+Workflows live in `.github/workflows/`, local scripts in `scripts/` (R/Python/shell — run `ls scripts/` for the current list). Data directories: `bouncer.duckdb` (main DB), `models/`, `cricinfo/` (`{format}_{gender}/` per-match tables + `_archive/`), `fox_cricket/`, `json_files/`, `parquet/`, `source/`, `blog/`, `manifests/`, `checkpoints/`, `temp_*/`.
 
 **Gitignored (large/regenerable):** `*.duckdb`, `models/*.ubj`, `models/*.rds`, `cricinfo/`, `fox_cricket/`, `json_files/`, `temp_*/`
 These files are distributed via GitHub Releases, not tracked in git.
