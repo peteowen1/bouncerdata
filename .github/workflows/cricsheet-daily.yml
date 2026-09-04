@@ -324,15 +324,38 @@ jobs:
               return(FALSE)
             }
 
+            # bouncerdata#67: every download_parquet() call's return value used
+            # to be discarded. If a file EXPECTED to already exist on the
+            # release (per the manifest downloaded above, before it gets
+            # reassigned to the local one below) fails to download -- a
+            # transient piggyback/network failure, not "genuinely doesn't
+            # exist yet" -- merge_and_write()'s file.exists(existing_file)
+            # check would see no local copy, take its else branch, and
+            # silently replace the entire historical parquet with just
+            # today's small batch on upload. Abort instead of risking that;
+            # next run will retry. A file NOT expected to exist yet (a
+            # brand-new match_type/gender partition never seen before) is
+            # legitimately allowed to "fail" to download.
+            abort_if_missing_expected <- function(filename, ok, expected) {
+              if (!ok && expected) {
+                stop(sprintf(
+                  "download_parquet(%s) failed but the file is expected to exist on the release (current release has %d matches) -- aborting rather than let merge_and_write() treat this as \"genuinely new\" and overwrite release history with today's batch alone. Next run will retry.",
+                  filename, current_count))
+              }
+            }
+
             # Download core files
-            download_parquet("matches.parquet")
-            download_parquet("players.parquet")
-            download_parquet("match_innings.parquet")
-            download_parquet("innings_powerplays.parquet")
+            core_expected <- current_count > 0
+            abort_if_missing_expected("matches.parquet", download_parquet("matches.parquet"), core_expected)
+            abort_if_missing_expected("players.parquet", download_parquet("players.parquet"), core_expected)
+            abort_if_missing_expected("match_innings.parquet", download_parquet("match_innings.parquet"), core_expected)
+            abort_if_missing_expected("innings_powerplays.parquet", download_parquet("innings_powerplays.parquet"), core_expected)
 
             # Download affected delivery partitions
+            manifest_partitions <- if (!is.null(manifest$partitions)) names(manifest$partitions) else character(0)
             for (pk in affected_partitions) {
-              download_parquet(paste0("deliveries_", pk, ".parquet"))
+              fname <- paste0("deliveries_", pk, ".parquet")
+              abort_if_missing_expected(fname, download_parquet(fname), pk %in% manifest_partitions)
             }
 
             # Merge and write
