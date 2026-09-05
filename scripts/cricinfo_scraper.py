@@ -1780,6 +1780,28 @@ def main():
 
             context.close()
             _cleanup_browser()
+
+            # A refresh that fetched NOTHING is a systemic failure -- Akamai
+            # blocking every request, or a __NEXT_DATA__ shape change -- not an
+            # empty result. fetch_fixtures_fast() catches every error internally
+            # and returns [], so without this the process exits 0 having
+            # refreshed zero of the series it visited, and the workflow step
+            # calling it (continue-on-error, by design) reports success. That is
+            # precisely the silently-stuck-state failure this feature exists to
+            # fix, recreated one layer up.
+            #
+            # Only the zero case fails. Partial degradation (say 300 of 450
+            # erroring) is reported to the step summary instead, because there is
+            # no measured baseline error rate here to set a threshold against and
+            # an invented cutoff would just trade silence for false alarms.
+            if target_series and success == 0:
+                print(
+                    f"::error::--fixtures-only visited {len(target_series)} series and got zero "
+                    f"successful fetches. That is bot detection or a site format change, not an "
+                    f"empty result. Failing so the caller's exit status is truthful.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             return
 
         total_matches = 0

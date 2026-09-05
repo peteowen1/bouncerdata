@@ -14,6 +14,10 @@
 # Runtime: ~10-60 min depending on number of new matches
 #
 # On schedule: scrapes top N series per format from series_list.csv (default: 3)
+# Also refreshes fixture STATUSES across a much wider series window
+# (--fixtures-only, default 150 series per format) AFTER the scrape, so matches
+# that were recorded as upcoming do not stay frozen at status='PRE' forever.
+#
 # On manual trigger: accepts series IDs, format filter, max matches, force flag
 
 name: Cricinfo Scrape
@@ -46,6 +50,12 @@ on:
         required: false
         default: false
         type: boolean
+
+      fixtures_max_series:
+        description: 'Max series per format for the fixture-status refresh (raise for a deep catch-up)'
+        required: false
+        default: '150'
+        type: string
 
 permissions:
   contents: write
@@ -233,33 +243,205 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Dispatch inputs reach the shell through `env:`, never by interpolating
+      # ${{ }} into the script body. Template expansion happens BEFORE bash sees
+      # the script, so an input containing shell metacharacters would run as code
+      # on the runner instead of being passed as an argument.
+      #
+      # Each value is validated as well, because a value that is safe from code
+      # injection can still smuggle extra CLI flags into $ARGS through the
+      # unquoted word-splitting on the final line.
       - name: Run scraper
         id: scrape
+        env:
+          MAX_MATCHES: ${{ inputs.max_matches || '50' }}
+          MAX_SERIES: ${{ inputs.max_series || '3' }}
+          SERIES_INPUT: ${{ inputs.series_ids }}
+          FORMAT_INPUT: ${{ inputs.format }}
+          FORCE_INPUT: ${{ inputs.force }}
         run: |
-          ARGS="--output-dir cricinfo --max-matches ${{ inputs.max_matches || '50' }} --max-series ${{ inputs.max_series || '3' }} --scan-parquets"
+          require_int() {
+            case "$2" in
+              ''|*[!0-9]*)
+                echo "::error::$1 must be a positive integer (got '$2')"
+                exit 1
+                ;;
+            esac
+          }
+          require_int max_matches "$MAX_MATCHES"
+          require_int max_series "$MAX_SERIES"
+
+          ARGS="--output-dir cricinfo --max-matches $MAX_MATCHES --max-series $MAX_SERIES --scan-parquets"
 
           # Add series filter (manual trigger only)
-          SERIES_INPUT="${{ inputs.series_ids }}"
           if [ -n "$SERIES_INPUT" ]; then
+            if [ -n "$(printf '%s' "$SERIES_INPUT" | tr -d '0-9, ')" ]; then
+              echo "::error::series_ids must contain only digits, commas and spaces (got '$SERIES_INPUT')"
+              exit 1
+            fi
             # Convert comma-separated to space-separated for argparse nargs, collapse whitespace
             SERIES_ARGS=$(echo "$SERIES_INPUT" | tr ',' ' ' | tr -s ' ')
             ARGS="$ARGS --series $SERIES_ARGS"
           fi
 
           # Add format filter
-          FORMAT_INPUT="${{ inputs.format }}"
           if [ -n "$FORMAT_INPUT" ]; then
-            ARGS="$ARGS --format $FORMAT_INPUT"
+            case "$FORMAT_INPUT" in
+              t20i|odi|test) ARGS="$ARGS --format $FORMAT_INPUT" ;;
+              *)
+                echo "::error::format must be t20i, odi or test (got '$FORMAT_INPUT')"
+                exit 1
+                ;;
+            esac
           fi
 
           # Add force flag
-          if [ "${{ inputs.force }}" = "true" ]; then
+          if [ "$FORCE_INPUT" = "true" ]; then
             ARGS="$ARGS --force"
           fi
 
           echo "Running: python scripts/cricinfo_scraper.py $ARGS"
           xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" \
             python scripts/cricinfo_scraper.py $ARGS
+
+      # Refresh fixture statuses across a much wider series window than the
+      # ball-by-ball scrape uses (bouncerverse#84 / D-P64).
+      #
+      # Why the window has to be wider: the ball-by-ball scrape step above runs
+      # --max-series 3, and series are picked newest-first per format. Measured
+      # against the live release on 2026-09-05, the fixtures stuck at
+      # status='PRE' with a start_date already in the past sat at newest-first
+      # ranks 3..283 (median 47). A fixture refresh at --max-series 3 would
+      # therefore have refreshed 0 of the 1,133 stale rows -- a step that goes
+      # green every day and fixes nothing. Coverage measured from the live
+      # fixtures.parquet: 3 -> 0, 10 -> 84, 40 -> 484, 80 -> 785, 150 -> ~1,090.
+      #
+      # Note 1,233 rows are PRE but only 1,133 are stale; the other ~100 are
+      # genuinely upcoming matches and are supposed to be PRE.
+      #
+      # This is affordable daily because --fixtures-only uses an in-browser
+      # fetch() instead of page navigation (~4x faster, and it batches a save
+      # every 50 series), and save_fixtures() merges by match_id with the newer
+      # row winning -- so a stale status corrects itself in place.
+      #
+      # It runs AFTER the ball-by-ball scrape, not before, on purpose. Visiting
+      # up to 450 series in one browser session is the most bot-detection
+      # exposure in this job, and the scrape is the part whose failure actually
+      # loses data. Doing the cheap, replaceable work last means a refresh that
+      # trips Akamai cannot take the scrape down with it.
+      #
+      # continue-on-error mirrors "Discover new series": a fixtures refresh
+      # failing must never fail the job, since the scrape and the uploads that
+      # matter have already succeeded by this point.
+      - name: Refresh fixture statuses
+        id: fixtures
+        continue-on-error: true
+        env:
+          FIXTURES_MAX_SERIES: ${{ inputs.fixtures_max_series || '150' }}
+          FORMAT_INPUT: ${{ inputs.format }}
+        run: |
+          # Inputs arrive via env, never by template interpolation -- see the
+          # scrape step above for why.
+          case "$FIXTURES_MAX_SERIES" in
+            ''|*[!0-9]*)
+              echo "::error::fixtures_max_series must be a positive integer (got '$FIXTURES_MAX_SERIES')"
+              exit 1
+              ;;
+          esac
+
+          ARGS="--fixtures-only --output-dir cricinfo --scan-parquets --max-series $FIXTURES_MAX_SERIES"
+
+          if [ -n "$FORMAT_INPUT" ]; then
+            case "$FORMAT_INPUT" in
+              t20i|odi|test) ARGS="$ARGS --format $FORMAT_INPUT" ;;
+              *)
+                echo "::error::format must be t20i, odi or test (got '$FORMAT_INPUT')"
+                exit 1
+                ;;
+            esac
+          fi
+
+          echo "Running: python scripts/cricinfo_scraper.py $ARGS"
+          # pipefail so tee cannot mask the scraper's exit status.
+          set -o pipefail
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" \
+            python scripts/cricinfo_scraper.py $ARGS 2>&1 | tee "$RUNNER_TEMP/fixtures_refresh.log"
+
+      # "Refresh fixture statuses" is continue-on-error by design, and GitHub
+      # sets a continue-on-error step's CONCLUSION to success even when it
+      # fails. Job-level failure() therefore never sees it, "Create issue on
+      # failure" below never fires, and a refresh that is 100% broken looks
+      # identical to a working one from the runs list, from email, and from an
+      # open-issue search. That is the same silently-stuck-state problem this
+      # refresh exists to cure, reproduced one layer up.
+      #
+      # Reached through steps.fixtures.OUTCOME, which does see through
+      # continue-on-error -- the same idiom "Commit updated series list"
+      # already uses on steps.discover.outcome.
+      - name: Report fixture-refresh outcome
+        if: always()
+        env:
+          FIXTURES_OUTCOME: ${{ steps.fixtures.outcome }}
+        run: |
+          echo "- **Fixture-status refresh**: $FIXTURES_OUTCOME" >> $GITHUB_STEP_SUMMARY
+          LOG="$RUNNER_TEMP/fixtures_refresh.log"
+          if [ -f "$LOG" ] && grep -q "FIXTURES DONE:" "$LOG"; then
+            # Surfaces PARTIAL degradation, which the scraper's zero-success
+            # guard deliberately does not fail on: there is no measured baseline
+            # error rate to set a threshold against, so the counts are reported
+            # for a human rather than judged by an invented cutoff.
+            echo "  - $(grep -m1 'FIXTURES DONE:' "$LOG")" >> $GITHUB_STEP_SUMMARY
+            echo "  - $(grep -m1 'series returned no data' "$LOG" | tr -d '()')" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Alert on fixture-refresh failure
+        if: steps.fixtures.outcome == 'failure'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = 'Cricinfo fixture-status refresh is failing';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            // Dedup on the exact title against OPEN issues, not on a date. The
+            // job-level failure issue below keys on the date, which is right for
+            // a one-off crash but would let a PERMANENT failure open a fresh
+            // issue every morning and let each one age out of attention. One
+            // issue that stays open until somebody looks is the point here.
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'workflow-failure,cricinfo',
+            });
+            if (issues.data.some(i => i.title === title)) {
+              core.info('An open issue for this already exists; not filing another.');
+              return;
+            }
+
+            const body = [
+              `The "Refresh fixture statuses" step failed in ${runUrl}.`,
+              '',
+              'That step is `continue-on-error: true` on purpose, so the ball-by-ball',
+              'scrape and the predictions dispatch are unaffected and the job still',
+              'reports success. This issue exists because that also means the refresh',
+              'could otherwise fail every day forever with nothing to show for it.',
+              '',
+              'Check the step log for the real cause: Akamai bot detection, a',
+              '`__NEXT_DATA__` format change, or a timeout. The scraper exits 1 when it',
+              'gets zero successful fetches, so this firing means the refresh got',
+              'nothing at all rather than merely less than usual.',
+              '',
+              'Close this once the refresh is confirmed working; a new one opens if it',
+              'starts failing again.',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['workflow-failure', 'cricinfo'],
+            });
 
       - name: Create release if needed
         run: |
@@ -369,11 +551,20 @@ jobs:
             -f event_type=cricinfo-complete
           echo "Dispatched predictions trigger to bouncer"
 
+      # Same rule as the scrape step: the dispatch inputs come in through env
+      # and are read with process.env, not interpolated into the script. This is
+      # a JS template literal, so an input containing a backtick or ${...} would
+      # otherwise be evaluated as JavaScript inside the runner.
       - name: Create issue on failure
         if: failure()
         uses: actions/github-script@v9
+        env:
+          SERIES_INPUT: ${{ inputs.series_ids }}
+          FORMAT_INPUT: ${{ inputs.format }}
         with:
           script: |
+            const seriesIds = process.env.SERIES_INPUT || 'scheduled (auto from CSV)';
+            const formatFilter = process.env.FORMAT_INPUT || 'all';
             const title = `Cricinfo Scrape Failed - ${new Date().toISOString().split('T')[0]}`;
             const body = `## Workflow Failure
 
@@ -382,8 +573,8 @@ jobs:
             - **Run ID**: ${{ github.run_id }}
             - **Run URL**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             - **Triggered by**: ${{ github.event_name }}
-            - **Series IDs**: ${{ inputs.series_ids || 'scheduled (auto from CSV)' }}
-            - **Format**: ${{ inputs.format || 'all' }}
+            - **Series IDs**: ${seriesIds}
+            - **Format**: ${formatFilter}
 
             ### Common Failure Causes
             - Akamai bot detection (stealth patches may need updating)
