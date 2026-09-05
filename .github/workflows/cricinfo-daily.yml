@@ -14,6 +14,10 @@
 # Runtime: ~10-60 min depending on number of new matches
 #
 # On schedule: scrapes top N series per format from series_list.csv (default: 3)
+# Also refreshes fixture STATUSES across a much wider series window
+# (--fixtures-only, default 150 series per format) before scraping, so matches
+# that were recorded as upcoming do not stay frozen at status='PRE' forever.
+#
 # On manual trigger: accepts series IDs, format filter, max matches, force flag
 
 name: Cricinfo Scrape
@@ -46,6 +50,12 @@ on:
         required: false
         default: false
         type: boolean
+
+      fixtures_max_series:
+        description: 'Max series per format for the fixture-status refresh (raise for a deep catch-up)'
+        required: false
+        default: '150'
+        type: string
 
 permissions:
   contents: write
@@ -255,6 +265,50 @@ jobs:
           # Add force flag
           if [ "${{ inputs.force }}" = "true" ]; then
             ARGS="$ARGS --force"
+          fi
+
+          echo "Running: python scripts/cricinfo_scraper.py $ARGS"
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x900x24" \
+            python scripts/cricinfo_scraper.py $ARGS
+
+      # Refresh fixture statuses across a much wider series window than the
+      # ball-by-ball scrape uses (bouncerverse#84 / D-P64).
+      #
+      # Why the window has to be wider: the ball-by-ball scrape step above runs
+      # --max-series 3, and series are picked newest-first per format. Measured
+      # against the live release on 2026-09-05, the fixtures stuck at
+      # status='PRE' with a start_date already in the past sat at newest-first
+      # ranks 3..283 (median 47). A fixture refresh at --max-series 3 would
+      # therefore have refreshed 0 of the 1,133 stale rows -- a step that goes
+      # green every day and fixes nothing. Coverage measured from the live
+      # fixtures.parquet: 3 -> 0, 10 -> 84, 40 -> 484, 80 -> 785, 150 -> ~1,090.
+      #
+      # Note 1,233 rows are PRE but only 1,133 are stale; the other ~100 are
+      # genuinely upcoming matches and are supposed to be PRE.
+      #
+      # This is affordable daily because --fixtures-only uses an in-browser
+      # fetch() instead of page navigation (~4x faster, and it batches a save
+      # every 50 series), and save_fixtures() merges by match_id with the newer
+      # row winning -- so a stale status corrects itself in place.
+      #
+      # It runs AFTER the ball-by-ball scrape, not before, on purpose. Visiting
+      # up to 450 series in one browser session is the most bot-detection
+      # exposure in this job, and the scrape is the part whose failure actually
+      # loses data. Doing the cheap, replaceable work last means a refresh that
+      # trips Akamai cannot take the scrape down with it.
+      #
+      # continue-on-error mirrors "Discover new series": a fixtures refresh
+      # failing must never fail the job, since the scrape and the uploads that
+      # matter have already succeeded by this point.
+      - name: Refresh fixture statuses
+        id: fixtures
+        continue-on-error: true
+        run: |
+          ARGS="--fixtures-only --output-dir cricinfo --scan-parquets --max-series ${{ inputs.fixtures_max_series || '150' }}"
+
+          FORMAT_INPUT="${{ inputs.format }}"
+          if [ -n "$FORMAT_INPUT" ]; then
+            ARGS="$ARGS --format $FORMAT_INPUT"
           fi
 
           echo "Running: python scripts/cricinfo_scraper.py $ARGS"
