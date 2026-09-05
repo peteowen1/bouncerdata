@@ -243,27 +243,60 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Dispatch inputs reach the shell through `env:`, never by interpolating
+      # ${{ }} into the script body. Template expansion happens BEFORE bash sees
+      # the script, so an input containing shell metacharacters would run as code
+      # on the runner instead of being passed as an argument.
+      #
+      # Each value is validated as well, because a value that is safe from code
+      # injection can still smuggle extra CLI flags into $ARGS through the
+      # unquoted word-splitting on the final line.
       - name: Run scraper
         id: scrape
+        env:
+          MAX_MATCHES: ${{ inputs.max_matches || '50' }}
+          MAX_SERIES: ${{ inputs.max_series || '3' }}
+          SERIES_INPUT: ${{ inputs.series_ids }}
+          FORMAT_INPUT: ${{ inputs.format }}
+          FORCE_INPUT: ${{ inputs.force }}
         run: |
-          ARGS="--output-dir cricinfo --max-matches ${{ inputs.max_matches || '50' }} --max-series ${{ inputs.max_series || '3' }} --scan-parquets"
+          require_int() {
+            case "$2" in
+              ''|*[!0-9]*)
+                echo "::error::$1 must be a positive integer (got '$2')"
+                exit 1
+                ;;
+            esac
+          }
+          require_int max_matches "$MAX_MATCHES"
+          require_int max_series "$MAX_SERIES"
+
+          ARGS="--output-dir cricinfo --max-matches $MAX_MATCHES --max-series $MAX_SERIES --scan-parquets"
 
           # Add series filter (manual trigger only)
-          SERIES_INPUT="${{ inputs.series_ids }}"
           if [ -n "$SERIES_INPUT" ]; then
+            if [ -n "$(printf '%s' "$SERIES_INPUT" | tr -d '0-9, ')" ]; then
+              echo "::error::series_ids must contain only digits, commas and spaces (got '$SERIES_INPUT')"
+              exit 1
+            fi
             # Convert comma-separated to space-separated for argparse nargs, collapse whitespace
             SERIES_ARGS=$(echo "$SERIES_INPUT" | tr ',' ' ' | tr -s ' ')
             ARGS="$ARGS --series $SERIES_ARGS"
           fi
 
           # Add format filter
-          FORMAT_INPUT="${{ inputs.format }}"
           if [ -n "$FORMAT_INPUT" ]; then
-            ARGS="$ARGS --format $FORMAT_INPUT"
+            case "$FORMAT_INPUT" in
+              t20i|odi|test) ARGS="$ARGS --format $FORMAT_INPUT" ;;
+              *)
+                echo "::error::format must be t20i, odi or test (got '$FORMAT_INPUT')"
+                exit 1
+                ;;
+            esac
           fi
 
           # Add force flag
-          if [ "${{ inputs.force }}" = "true" ]; then
+          if [ "$FORCE_INPUT" = "true" ]; then
             ARGS="$ARGS --force"
           fi
 
@@ -303,12 +336,29 @@ jobs:
       - name: Refresh fixture statuses
         id: fixtures
         continue-on-error: true
+        env:
+          FIXTURES_MAX_SERIES: ${{ inputs.fixtures_max_series || '150' }}
+          FORMAT_INPUT: ${{ inputs.format }}
         run: |
-          ARGS="--fixtures-only --output-dir cricinfo --scan-parquets --max-series ${{ inputs.fixtures_max_series || '150' }}"
+          # Inputs arrive via env, never by template interpolation -- see the
+          # scrape step above for why.
+          case "$FIXTURES_MAX_SERIES" in
+            ''|*[!0-9]*)
+              echo "::error::fixtures_max_series must be a positive integer (got '$FIXTURES_MAX_SERIES')"
+              exit 1
+              ;;
+          esac
 
-          FORMAT_INPUT="${{ inputs.format }}"
+          ARGS="--fixtures-only --output-dir cricinfo --scan-parquets --max-series $FIXTURES_MAX_SERIES"
+
           if [ -n "$FORMAT_INPUT" ]; then
-            ARGS="$ARGS --format $FORMAT_INPUT"
+            case "$FORMAT_INPUT" in
+              t20i|odi|test) ARGS="$ARGS --format $FORMAT_INPUT" ;;
+              *)
+                echo "::error::format must be t20i, odi or test (got '$FORMAT_INPUT')"
+                exit 1
+                ;;
+            esac
           fi
 
           echo "Running: python scripts/cricinfo_scraper.py $ARGS"
@@ -423,11 +473,20 @@ jobs:
             -f event_type=cricinfo-complete
           echo "Dispatched predictions trigger to bouncer"
 
+      # Same rule as the scrape step: the dispatch inputs come in through env
+      # and are read with process.env, not interpolated into the script. This is
+      # a JS template literal, so an input containing a backtick or ${...} would
+      # otherwise be evaluated as JavaScript inside the runner.
       - name: Create issue on failure
         if: failure()
         uses: actions/github-script@v9
+        env:
+          SERIES_INPUT: ${{ inputs.series_ids }}
+          FORMAT_INPUT: ${{ inputs.format }}
         with:
           script: |
+            const seriesIds = process.env.SERIES_INPUT || 'scheduled (auto from CSV)';
+            const formatFilter = process.env.FORMAT_INPUT || 'all';
             const title = `Cricinfo Scrape Failed - ${new Date().toISOString().split('T')[0]}`;
             const body = `## Workflow Failure
 
@@ -436,8 +495,8 @@ jobs:
             - **Run ID**: ${{ github.run_id }}
             - **Run URL**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             - **Triggered by**: ${{ github.event_name }}
-            - **Series IDs**: ${{ inputs.series_ids || 'scheduled (auto from CSV)' }}
-            - **Format**: ${{ inputs.format || 'all' }}
+            - **Series IDs**: ${seriesIds}
+            - **Format**: ${formatFilter}
 
             ### Common Failure Causes
             - Akamai bot detection (stealth patches may need updating)
