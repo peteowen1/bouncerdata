@@ -299,6 +299,27 @@ if (file.exists(rating_v2_path)) {
     arrange(bucket, role, rank)
   stopifnot(!anyNA(rv$player_id))
 
+  # FABLE-redteam-2026-09-07 F1: retired players were published with a rank,
+  # carrying the bucket population mean as their rating. Once decay has run,
+  # sum(w) ~ 0 and rating = pop (bouncer player_rating_v2.R:1160), so
+  # Sangakkara (last Test 2015) sat at TEST_INTL rank 73 on a constant. Drop
+  # rows with no evidence left (effective_matches < 1) or whose last match is
+  # more than 2 years before the bucket's as_at, then re-rank so the page's
+  # rank 1..N invariant still holds. as_at is per bucket, so compare per row.
+  before_f1 <- nrow(rv)
+  rv <- rv |>
+    filter(effective_matches >= 1,
+           last_match >= (as.Date(as_at) - 730)) |>
+    group_by(bucket, role) |>
+    arrange(desc(rating), .by_group = TRUE) |>
+    mutate(rank = row_number()) |>
+    ungroup() |>
+    arrange(bucket, role, rank)
+  cat(sprintf("  ratings v2: dropped %d/%d retired or evidence-free rows (F1 filter)
+",
+              before_f1 - nrow(rv), before_f1))
+  if (nrow(rv) == 0L) stop("F1 filter removed every rating row; check as_at/last_match.")
+
   # Enrich from the same id-keyed crosswalk the skill tables above use, so the
   # page can filter by country and show style badges and age without matching
   # on names. The join is on player_id and never on the name -- which matters
