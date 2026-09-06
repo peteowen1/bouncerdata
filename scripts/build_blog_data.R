@@ -301,15 +301,27 @@ if (file.exists(rating_v2_path)) {
 
   # FABLE-redteam-2026-09-07 F1: retired players were published with a rank,
   # carrying the bucket population mean as their rating. Once decay has run,
-  # sum(w) ~ 0 and rating = pop (bouncer player_rating_v2.R:1160), so
-  # Sangakkara (last Test 2015) sat at TEST_INTL rank 73 on a constant. Drop
-  # rows with no evidence left (effective_matches < 1) or whose last match is
-  # more than 2 years before the bucket's as_at, then re-rank so the page's
-  # rank 1..N invariant still holds. as_at is per bucket, so compare per row.
+  # sum(w) ~ 0 and rating = pop (bouncer player_rating_v2.R:1160), so the rating
+  # is not a measurement of anything. Drop rows with no evidence left, then
+  # re-rank so the page's rank 1..N invariant still holds.
+  #
+  # NARROWED 2026-09-07 after review. The first version of this filter also
+  # dropped anyone whose last match was more than 2 years before the bucket's
+  # as_at. That removed 1,529 rows that DO have evidence -- including Boult at
+  # ODI male bowler rank 2 (24.9 effective matches) and Bumrah at rank 16 (24.3)
+  # -- against 380 rows caught by the evidence test itself. Four times the
+  # defect, and it deleted the second-ranked bowler in the world. A player with
+  # 25 effective matches has an earned rating, not a population mean, however
+  # long ago he last played.
+  #
+  # Left undecided deliberately: effective_matches >= 1 does NOT remove every
+  # long-retired player, because decay is slow for a big career. Sangakkara
+  # still shows at 5.0 effective matches in t20-male and 2.7 in odi-male. Whether
+  # the rankings should show a retired great at a decayed-but-real rating is a
+  # judgment call for Pete, not something this filter should settle silently.
   before_f1 <- nrow(rv)
   rv <- rv |>
-    filter(effective_matches >= 1,
-           last_match >= (as.Date(as_at) - 730)) |>
+    filter(effective_matches >= 1) |>
     group_by(bucket, role) |>
     arrange(desc(rating), .by_group = TRUE) |>
     mutate(rank = row_number()) |>
@@ -318,7 +330,7 @@ if (file.exists(rating_v2_path)) {
   cat(sprintf("  ratings v2: dropped %d/%d retired or evidence-free rows (F1 filter)
 ",
               before_f1 - nrow(rv), before_f1))
-  if (nrow(rv) == 0L) stop("F1 filter removed every rating row; check as_at/last_match.")
+  if (nrow(rv) == 0L) stop("F1 filter removed every rating row; check effective_matches.")
 
   # Enrich from the same id-keyed crosswalk the skill tables above use, so the
   # page can filter by country and show style badges and age without matching
