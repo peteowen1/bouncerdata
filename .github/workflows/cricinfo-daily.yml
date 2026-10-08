@@ -56,6 +56,11 @@ on:
         required: false
         default: '150'
         type: string
+      allow_missing_assets:
+        description: 'Proceed when a combined bundle or fixtures.parquet is missing from the release (a deliberate rebuild). Default refuses: the bundles are the only copy of consolidated matches.'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -132,8 +137,58 @@ jobs:
             mkdir -p "cricinfo/$dir"
           done
           mkdir -p /tmp/cricinfo_dl
-          # Download all assets to temp dir, then sort by directory prefix
-          gh release download cricinfo -D /tmp/cricinfo_dl --pattern "*.parquet" 2>/dev/null || true
+          # Download all assets to temp dir, then sort by directory prefix.
+          #
+          # This used to be `gh release download ... 2>/dev/null || true`: any
+          # failed download -- one file or all of them -- was silent, and
+          # combine_cricinfo_parquets.py --merge below then rebuilt the bundles
+          # from whatever arrived. Since consolidate_cricinfo_assets.py deletes
+          # per-match assets once a bundle holds them, a bundle that failed to
+          # come down took those matches out of the next published bundle for
+          # good. Now every listed file must arrive intact, and the bundles that
+          # exist must still exist. Audit: vault/plans/CLOBBER-AUDIT-2026-10-08.md.
+          source scripts/release_safe.sh
+          if ! VB_SH_ASSETS_JSON=$(vb_sh_list_assets "$GITHUB_REPOSITORY" cricinfo 2>"$RUNNER_TEMP/list_err"); then
+            if grep -q "HTTP 404" "$RUNNER_TEMP/list_err"; then
+              echo "::notice::cricinfo release does not exist yet -- first run, starting empty"
+              VB_SH_ASSETS_JSON="[]"
+            else
+              cat "$RUNNER_TEMP/list_err"
+              echo "::error::could not list the cricinfo release -- refusing to scrape on a possibly incomplete restore"
+              exit 1
+            fi
+          fi
+          vb_sh_restore_all "$GITHUB_REPOSITORY" cricinfo /tmp/cricinfo_dl .parquet || {
+            echo "::error::cricinfo restore incomplete -- refusing to rebuild bundles from a partial set (a re-run usually clears this)"
+            exit 1
+          }
+          # The floor: every bundle that existed on 2026-10-08, plus fixtures.
+          # More may appear (innings_test_female has no data yet); none may vanish.
+          if [ "$VB_SH_ASSETS_JSON" != "[]" ]; then
+            MISSING=0
+            for t in balls innings match; do
+              for fg in t20i_male t20i_female odi_male odi_female test_male test_female; do
+                [ "$t$fg" = "inningstest_female" ] && continue
+                b="cricinfo_${t}_${fg}.parquet"
+                if [ ! -f "/tmp/cricinfo_dl/$b" ]; then
+                  echo "::error::$b should be on the cricinfo release but is missing"
+                  MISSING=$((MISSING + 1))
+                fi
+              done
+            done
+            if [ ! -f /tmp/cricinfo_dl/fixtures.parquet ]; then
+              echo "::error::fixtures.parquet should be on the cricinfo release but is missing"
+              MISSING=$((MISSING + 1))
+            fi
+            if [ "$MISSING" -gt 0 ]; then
+              if [ "$ALLOW_MISSING" = "true" ]; then
+                echo "::warning::$MISSING expected file(s) missing; continuing because allow_missing_assets=true"
+              else
+                echo "::error::$MISSING expected file(s) missing. The next bundle rebuild would drop every consolidated match they held. Restore them, or re-dispatch with allow_missing_assets=true if a rebuild is intended."
+                exit 1
+              fi
+            fi
+          fi
           RESTORED=0
           for f in /tmp/cricinfo_dl/*.parquet; do
             [ -f "$f" ] || continue
@@ -223,6 +278,7 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALLOW_MISSING: ${{ inputs.allow_missing_assets }}
 
       - name: Discover new series
         id: discover
@@ -457,6 +513,10 @@ jobs:
 
       - name: Upload results to release
         run: |
+          # Safe uploads: never delete an asset before its replacement is on the
+          # release (scripts/release_safe.sh). Each one briefly adds a temp asset,
+          # so the 950 cap guard above leaves the headroom it needs.
+          source scripts/release_safe.sh
           UPLOADED=0
           FAILED=0
           SKIPPED=0
@@ -483,7 +543,7 @@ jobs:
                 # Prefix asset name with dir so download can sort by format_gender
                 PREFIXED="/tmp/cricinfo_upload/${dir}__$(basename "$f")"
                 cp "$f" "$PREFIXED"
-                if gh release upload cricinfo "$PREFIXED" --clobber; then
+                if vb_sh_safe_upload "$GITHUB_REPOSITORY" cricinfo "$PREFIXED"; then
                   UPLOADED=$((UPLOADED + 1))
                 else
                   FAILED=$((FAILED + 1))
@@ -497,7 +557,7 @@ jobs:
           if [ -f "cricinfo/fixtures.parquet" ]; then
             if unchanged "cricinfo/fixtures.parquet"; then
               SKIPPED=$((SKIPPED + 1))
-            elif gh release upload cricinfo "cricinfo/fixtures.parquet" --clobber; then
+            elif vb_sh_safe_upload "$GITHUB_REPOSITORY" cricinfo "cricinfo/fixtures.parquet"; then
               UPLOADED=$((UPLOADED + 1))
             else
               FAILED=$((FAILED + 1))
@@ -507,7 +567,7 @@ jobs:
           # Upload combined parquets for remote R loader access
           for f in cricinfo/combined/cricinfo_*.parquet; do
             [ -f "$f" ] || continue
-            if gh release upload cricinfo "$f" --clobber; then
+            if vb_sh_safe_upload "$GITHUB_REPOSITORY" cricinfo "$f"; then
               UPLOADED=$((UPLOADED + 1))
             else
               FAILED=$((FAILED + 1))
