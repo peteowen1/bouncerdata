@@ -57,7 +57,7 @@ on:
         default: '150'
         type: string
       allow_missing_assets:
-        description: 'Proceed when a combined bundle or fixtures.parquet is missing from the release (a deliberate rebuild). Default refuses: the bundles are the only copy of consolidated matches.'
+        description: 'Proceed when a combined bundle or fixtures.parquet is missing from the release, or would shrink (a deliberate rebuild). Default refuses both: the bundles are the only copy of consolidated matches.'
         required: false
         default: false
         type: boolean
@@ -549,12 +549,14 @@ jobs:
           # that is how 2026-09-18 published cut-down bundles for three weeks.
           # allow_missing_assets=true lets a deliberate rebuild through.
           ROWS=/tmp/cricinfo_restored_rows.tsv
+          [ -f "$ROWS" ] || echo "::warning::$ROWS is missing -- the bundle/fixtures shrink guard cannot run this time"
           shrank() {
             local name want got
             name=$(basename "$1")
             want=$(awk -F'\t' -v n="$name" '$1 == n {print $2}' "$ROWS" 2>/dev/null)
             [ -n "$want" ] || return 1   # new file: nothing to compare against
             got=$(python -c 'import sys, pyarrow.parquet as pq; print(pq.read_metadata(sys.argv[1]).num_rows)' "$1") || return 0
+            case "$got" in ''|*[!0-9]*) echo "::error::could not read a row count for $name"; return 0 ;; esac
             if [ "$got" -lt "$want" ]; then
               if [ "$ALLOW_MISSING" = "true" ]; then
                 echo "::warning::$name shrank $want -> $got rows; uploading because allow_missing_assets=true"
