@@ -1,0 +1,29 @@
+name: Release-Safe Bash Tests
+
+# Runs scripts/tests/test_release_safe.sh on any change to the safe
+# upload/restore helpers or the workflow that uses them. Additive CI --
+# does not touch the scrape workflow itself.
+
+on:
+  push:
+    paths:
+      - 'scripts/release_safe.sh'
+      - 'scripts/tests/test_release_safe.sh'
+      - '.github/workflows/cricinfo-daily.yml'
+      - '.github/workflows/release-safe-tests.yml'
+  pull_request:
+    paths:
+      - 'scripts/release_safe.sh'
+      - 'scripts/tests/test_release_safe.sh'
+      - '.github/workflows/cricinfo-daily.yml'
+      - '.github/workflows/release-safe-tests.yml'
+
+jobs:
+  bash-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run release_safe.sh tests
+        run: bash scripts/tests/test_release_safe.sh
