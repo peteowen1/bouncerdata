@@ -162,13 +162,13 @@ jobs:
             echo "::error::cricinfo restore incomplete -- refusing to rebuild bundles from a partial set (a re-run usually clears this)"
             exit 1
           }
-          # The floor: every bundle that existed on 2026-10-08, plus fixtures.
-          # More may appear (innings_test_female has no data yet); none may vanish.
+          # The floor: all 18 bundles (3 tables x 6 format_genders) plus fixtures.
+          # innings_test_female was briefly excluded here as "no data yet" -- it
+          # had in fact been LOST on 2026-09-18 (see the row-count guard below).
           if [ "$VB_SH_ASSETS_JSON" != "[]" ]; then
             MISSING=0
             for t in balls innings match; do
               for fg in t20i_male t20i_female odi_male odi_female test_male test_female; do
-                [ "$t$fg" = "inningstest_female" ] && continue
                 b="cricinfo_${t}_${fg}.parquet"
                 if [ ! -f "/tmp/cricinfo_dl/$b" ]; then
                   echo "::error::$b should be on the cricinfo release but is missing"
@@ -189,6 +189,19 @@ jobs:
               fi
             fi
           fi
+          # Row counts of the bundles + fixtures as restored, for the upload
+          # step's shrink guard. Presence is not enough: on 2026-09-18
+          # fixtures.parquet went from 45,717 rows to 216 and every check
+          # still passed, because a file was there.
+          python - /tmp/cricinfo_dl > /tmp/cricinfo_restored_rows.tsv <<'PY'
+          import os, sys
+          import pyarrow.parquet as pq
+          d = sys.argv[1]
+          for n in sorted(os.listdir(d)):
+              if n.startswith("cricinfo_") or n == "fixtures.parquet":
+                  print(f"{n}\t{pq.read_metadata(os.path.join(d, n)).num_rows}")
+          PY
+          echo "Recorded row counts for $(wc -l < /tmp/cricinfo_restored_rows.tsv) bundle/fixtures files"
           RESTORED=0
           for f in /tmp/cricinfo_dl/*.parquet; do
             [ -f "$f" ] || continue
@@ -530,6 +543,28 @@ jobs:
           unchanged() {
             grep -qxF "$(md5sum "$1")" "$MANIFEST"
           }
+          # Shrink guard for the bundles + fixtures: true (0) when the file has
+          # FEWER rows than the copy restored at the start of this run, or
+          # cannot be read. Never upload one of those over the release copy:
+          # that is how 2026-09-18 published cut-down bundles for three weeks.
+          # allow_missing_assets=true lets a deliberate rebuild through.
+          ROWS=/tmp/cricinfo_restored_rows.tsv
+          shrank() {
+            local name want got
+            name=$(basename "$1")
+            want=$(awk -F'\t' -v n="$name" '$1 == n {print $2}' "$ROWS" 2>/dev/null)
+            [ -n "$want" ] || return 1   # new file: nothing to compare against
+            got=$(python -c 'import sys, pyarrow.parquet as pq; print(pq.read_metadata(sys.argv[1]).num_rows)' "$1") || return 0
+            if [ "$got" -lt "$want" ]; then
+              if [ "$ALLOW_MISSING" = "true" ]; then
+                echo "::warning::$name shrank $want -> $got rows; uploading because allow_missing_assets=true"
+                return 1
+              fi
+              echo "::error::$name has $got rows, fewer than the $want restored at the start of this run -- refusing to upload it over the release copy"
+              return 0
+            fi
+            return 1
+          }
           mkdir -p /tmp/cricinfo_upload
           for dir in t20i_male t20i_female odi_male odi_female test_male test_female; do
             DIR="cricinfo/$dir"
@@ -557,6 +592,8 @@ jobs:
           if [ -f "cricinfo/fixtures.parquet" ]; then
             if unchanged "cricinfo/fixtures.parquet"; then
               SKIPPED=$((SKIPPED + 1))
+            elif shrank "cricinfo/fixtures.parquet"; then
+              FAILED=$((FAILED + 1))
             elif vb_sh_safe_upload "$GITHUB_REPOSITORY" cricinfo "cricinfo/fixtures.parquet"; then
               UPLOADED=$((UPLOADED + 1))
             else
@@ -567,6 +604,10 @@ jobs:
           # Upload combined parquets for remote R loader access
           for f in cricinfo/combined/cricinfo_*.parquet; do
             [ -f "$f" ] || continue
+            if shrank "$f"; then
+              FAILED=$((FAILED + 1))
+              continue
+            fi
             if vb_sh_safe_upload "$GITHUB_REPOSITORY" cricinfo "$f"; then
               UPLOADED=$((UPLOADED + 1))
             else
@@ -601,6 +642,7 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALLOW_MISSING: ${{ inputs.allow_missing_assets }}
 
       - name: Dispatch predictions trigger
         if: success()
