@@ -234,10 +234,20 @@ def fetch_fixtures_fast(page, series_url, series_id, series_name="",
     url = series_url + "/match-schedule-fixtures-and-results"
 
     # JavaScript that fetches the page HTML and extracts __NEXT_DATA__
+    #
+    # Fetch the same PATH on the page's own origin. www.espncricinfo.com now
+    # redirects to www.cricinfo.com, so after the homepage visit the page sits
+    # on cricinfo.com and a fetch() to an espncricinfo.com URL is cross-origin:
+    # the browser blocks it with "TypeError: Failed to fetch". Every series
+    # failed that way from the day this fast path shipped (issue #74, 450/450
+    # series each run). Page navigation follows the redirect, which is why the
+    # ball-by-ball scrape kept working.
     JS_FETCH = """
         async (url) => {
             try {
-                const resp = await fetch(url);
+                const target = new URL(url);
+                const sameOrigin = new URL(target.pathname + target.search, window.location.origin);
+                const resp = await fetch(sameOrigin.href);
                 if (!resp.ok) return { error: resp.status };
                 const html = await resp.text();
                 const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([\\s\\S]*?)<\\/script>/);
