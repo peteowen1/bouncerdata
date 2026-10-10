@@ -141,6 +141,15 @@ jobs:
               suffix <- file_types[[type_name]]
               filename <- paste0("all_", fmt, "_", type_name, ".parquet")
               asset_exists <- filename %in% release_assets
+              # An upload whose final rename failed leaves the data on the
+              # release only as vbnew-...--<filename> (scripts/release_safe.sh).
+              # That is not "no existing data": stop rather than rebuild over it.
+              stranded <- release_assets[startsWith(release_assets, "vbnew-") &
+                                         endsWith(release_assets, paste0("--", filename))]
+              if (!asset_exists && length(stranded) > 0) {
+                stop(sprintf("%s is missing from the foxsports release but a temp copy (%s) is there -- an earlier upload did not finish its rename. Rename it to %s, then re-run.",
+                             filename, stranded[1], filename))
+              }
 
               restored_ok <- tryCatch({
                 piggyback::pb_download(
@@ -475,6 +484,29 @@ jobs:
             }
           )
 
+          # Never pb_upload(overwrite = TRUE): it DELETES the old asset before it
+          # uploads, so a failed upload leaves the release without the file, and
+          # the next run's restore reads that as "no existing data" and publishes
+          # only the current and previous year over the history
+          # (vault/plans/CLOBBER-AUDIT-2026-10-08.md, HIGH #6). vb_sh_safe_upload
+          # keeps the old asset until a verified replacement is up
+          # (scripts/release_safe.sh, tested by release-safe-tests.yml).
+          safe_upload <- function(f) {
+            # The path goes through the environment, not the command string, so
+            # no quoting of it is needed.
+            Sys.setenv(VB_FILE = f)
+            on.exit(Sys.unsetenv("VB_FILE"), add = TRUE)
+            out <- suppressWarnings(system2(
+              "bash",
+              c("-c", shQuote('source scripts/release_safe.sh && vb_sh_safe_upload peteowen1/bouncerdata foxsports "$VB_FILE"')),
+              stdout = TRUE, stderr = ""
+            ))
+            if (!any(out == paste("OK", basename(f)))) {
+              stop(paste(c("safe upload did not report OK:", out), collapse = " "))
+            }
+            invisible(TRUE)
+          }
+
           # Upload combined files for each format
           for (format in names(results)) {
             format_dir <- file.path(output_dir, tolower(format))
@@ -488,7 +520,7 @@ jobs:
                 next
               }
               tryCatch({
-                piggyback::pb_upload(f, repo = "peteowen1/bouncerdata", tag = "foxsports", overwrite = TRUE)
+                safe_upload(f)
                 cli::cli_alert_success("Uploaded {basename(f)} ({round(fsize / 1024)}KB)")
               }, error = function(e) {
                 cli::cli_alert_danger("Failed to upload {basename(f)}: {e$message}")
@@ -499,12 +531,7 @@ jobs:
 
           # Upload manifest
           tryCatch({
-            piggyback::pb_upload(
-              file.path(output_dir, "manifest.json"),
-              repo = "peteowen1/bouncerdata",
-              tag = "foxsports",
-              overwrite = TRUE
-            )
+            safe_upload(file.path(output_dir, "manifest.json"))
             cli::cli_alert_success("Uploaded manifest.json")
           }, error = function(e) {
             cli::cli_alert_warning("Failed to upload manifest: {e$message}")
@@ -535,6 +562,8 @@ jobs:
         shell: Rscript {0}
         env:
           GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+          # gh, used by scripts/release_safe.sh for the safe uploads
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Summary
         run: |
