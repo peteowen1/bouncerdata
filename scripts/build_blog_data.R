@@ -323,6 +323,12 @@ if (file.exists(rating_v2_path)) {
   # from the 2-year clause removed above: that one was sold as an evidence fix;
   # this one is a stated definition of "current".
   retired_after_years <- 3
+  # filter() drops a row whose condition is NA, so a missing date would vanish
+  # here and be counted as a retirement. Fail instead.
+  if (anyNA(rv$last_match) || anyNA(rv$as_at)) {
+    stop("player_rating_v2.parquet has NA last_match (", sum(is.na(rv$last_match)),
+         ") or as_at (", sum(is.na(rv$as_at)), "); the 3-year filter would drop them silently.")
+  }
   before_f1 <- nrow(rv)
   rv <- rv |>
     filter(effective_matches >= 1,
@@ -404,7 +410,8 @@ if (file.exists(rating_v2_path)) {
       stop("No provisional match floor for format(s): ",
            paste(unknown, collapse = ", "), ". Add them to provisional_floor.")
     }
-    vv$provisional <- vv$matches < provisional_floor[fmt]
+    if (anyNA(vv$matches)) stop("player_value_v2.parquet has NA matches; provisional cannot be set.")
+    vv$provisional <- unname(vv$matches < provisional_floor[fmt])
     cat(sprintf("  values v2:  %d/%d rows flagged provisional (%d in a top 20)\n",
                 sum(vv$provisional), nrow(vv),
                 sum(vv$provisional & vv$rank <= 20)))
