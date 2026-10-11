@@ -314,22 +314,33 @@ if (file.exists(rating_v2_path)) {
   # 25 effective matches has an earned rating, not a population mean, however
   # long ago he last played.
   #
-  # Left undecided deliberately: effective_matches >= 1 does NOT remove every
-  # long-retired player, because decay is slow for a big career. Sangakkara
-  # still shows at 5.0 effective matches in t20-male and 2.7 in odi-male. Whether
-  # the rankings should show a retired great at a decayed-but-real rating is a
-  # judgment call for Pete, not something this filter should settle silently.
+  # effective_matches >= 1 does NOT remove every long-retired player, because
+  # decay is slow for a big career: Herath sat at Test bowler #21 7.7 years
+  # after his last Test, Morkel at #32. Pete's call 2026-10-11: the page is
+  # "who is best now", so hide anyone whose last match is more than
+  # `retired_after_years` before the bucket's as_at. This hides them from the
+  # page only -- their ratings in bouncer are unchanged. It is a different rule
+  # from the 2-year clause removed above: that one was sold as an evidence fix;
+  # this one is a stated definition of "current".
+  retired_after_years <- 3
+  # filter() drops a row whose condition is NA, so a missing date would vanish
+  # here and be counted as a retirement. Fail instead.
+  if (anyNA(rv$last_match) || anyNA(rv$as_at)) {
+    stop("player_rating_v2.parquet has NA last_match (", sum(is.na(rv$last_match)),
+         ") or as_at (", sum(is.na(rv$as_at)), "); the 3-year filter would drop them silently.")
+  }
   before_f1 <- nrow(rv)
   rv <- rv |>
-    filter(effective_matches >= 1) |>
+    filter(effective_matches >= 1,
+           as.numeric(as.Date(as_at) - as.Date(last_match)) <=
+             retired_after_years * 365.25) |>
     group_by(bucket, role) |>
     arrange(desc(rating), .by_group = TRUE) |>
     mutate(rank = row_number()) |>
     ungroup() |>
     arrange(bucket, role, rank)
-  cat(sprintf("  ratings v2: dropped %d/%d retired or evidence-free rows (F1 filter)
-",
-              before_f1 - nrow(rv), before_f1))
+  cat(sprintf("  ratings v2: dropped %d/%d evidence-free or not-played-in-%d-years rows\n",
+              before_f1 - nrow(rv), before_f1, retired_after_years))
   if (nrow(rv) == 0L) stop("F1 filter removed every rating row; check effective_matches.")
 
   # Enrich from the same id-keyed crosswalk the skill tables above use, so the
@@ -388,6 +399,22 @@ if (file.exists(rating_v2_path)) {
              calibrated, as_at) |>
       arrange(bucket, rank)
     stopifnot(!anyNA(vv$player_id))
+
+    # Pete's call 2026-10-11: flag, don't drop, values resting on few matches.
+    # min_balls = 1000 clears in four Tests for a bowler, so JA Duffy sat at
+    # Test #2 on 4 matches. The page decides how to show `provisional`.
+    provisional_floor <- c(test = 15, test_intl = 15, odi = 25, t20 = 30)
+    fmt <- sub("-.*$", "", vv$bucket)
+    unknown <- setdiff(unique(fmt), names(provisional_floor))
+    if (length(unknown)) {
+      stop("No provisional match floor for format(s): ",
+           paste(unknown, collapse = ", "), ". Add them to provisional_floor.")
+    }
+    if (anyNA(vv$matches)) stop("player_value_v2.parquet has NA matches; provisional cannot be set.")
+    vv$provisional <- unname(vv$matches < provisional_floor[fmt])
+    cat(sprintf("  values v2:  %d/%d rows flagged provisional (%d in a top 20)\n",
+                sum(vv$provisional), nrow(vv),
+                sum(vv$provisional & vv$rank <= 20)))
     write_parquet(vv, "blog/player-values-v2.parquet")
     cat(sprintf("  values v2:  %d rows across %d buckets\n",
                 nrow(vv), dplyr::n_distinct(vv$bucket)))
