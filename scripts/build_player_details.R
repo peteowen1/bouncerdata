@@ -4,11 +4,15 @@
 # Requires: bouncer.duckdb with cricsheet + cricinfo schemas
 # Produces: blog/bouncer_player_details.parquet
 #
-# The crosswalk matches players across datasets using:
-#   - Shared match_id (both cover same matches)
-#   - Same batting team within that match
-#   - Same surname (last token of player name)
-#   - Ranked by number of co-occurrences (2+ = confident match)
+# The crosswalk is cricsheet's own people register (key_cricinfo, _2, _3),
+# the exact id link. It replaced a guess from shared matches + team + surname
+# on 2026-10-12: the guess was wrong for 44 of its 2,749 players (two
+# surname-sharing team-mates swapped, so the blog showed one man's full name
+# and age on the other's page) and missed 4,285 players the register maps.
+#
+# `dob` comes from main.player_dob, the table the ratings age players with
+# (cricinfo via the same register keys, then Wikidata), so the blog's age and
+# the rating's age agree. Without that table it falls back to cricinfo's.
 #
 # `country` is NOT taken from cricsheet.players (that column is first-seen
 # team, so it reads club/franchise names for most players -- bouncerverse#77,
@@ -37,41 +41,29 @@ dir.create("blog", showWarnings = FALSE)
 
 cat("Building player details with cricinfo enrichment...\n")
 
-# Step 1: Build crosswalk via shared matches + team + surname
-cat("  Building cricsheet ↔ cricinfo crosswalk...\n")
+# Step 1: Crosswalk from the register. A player can carry up to three cricinfo
+# keys; take the first that cricinfo.innings actually holds, in key order.
+cat("  Building cricsheet <-> cricinfo crosswalk from the people register...\n")
 crosswalk <- dbGetQuery(con, "
-  WITH cs_batters AS (
-    SELECT DISTINCT match_id, batter_id, batting_team
-    FROM cricsheet.deliveries
-    WHERE match_id IN (SELECT DISTINCT match_id FROM cricinfo.innings)
+  WITH keys AS (
+    SELECT identifier AS cs_id, key_cricinfo AS ck, 1 AS key_rank FROM cricsheet.people_register
+    UNION ALL SELECT identifier, key_cricinfo_2, 2 FROM cricsheet.people_register
+    UNION ALL SELECT identifier, key_cricinfo_3, 3 FROM cricsheet.people_register
   ),
-  raw_matches AS (
-    SELECT
-      cb.batter_id AS cs_id,
-      ci.player_id AS ci_id,
-      COUNT(DISTINCT cb.match_id) AS shared_matches
-    FROM cs_batters cb
-    JOIN cricsheet.players cs ON cb.batter_id = cs.player_id
-    JOIN cricinfo.innings ci ON cb.match_id = ci.match_id
-      AND cb.batting_team = ci.team_name
-      AND SPLIT_PART(cs.player_name, ' ', -1) = SPLIT_PART(ci.player_name, ' ', -1)
-    GROUP BY cb.batter_id, ci.player_id
-  ),
+  ci AS (SELECT DISTINCT player_id AS ci_id FROM cricinfo.innings),
   ranked AS (
-    -- `ci_id` is the explicit tiebreaker: without it, a cricsheet player who
-    -- matches two cricinfo ids on the same number of shared matches is assigned
-    -- one of them arbitrarily and differently on each run, which changes their
-    -- name/DOB/style enrichment AND their fallback nationality. Same defect
-    -- class as the two ranking queries below.
-    SELECT cs_id, ci_id, shared_matches,
-      ROW_NUMBER() OVER (PARTITION BY cs_id ORDER BY shared_matches DESC, ci_id ASC) AS rn
-    FROM raw_matches
+    SELECT k.cs_id, ci.ci_id,
+      ROW_NUMBER() OVER (PARTITION BY k.cs_id ORDER BY k.key_rank, ci.ci_id) AS rn
+    FROM keys k JOIN ci ON CAST(ci.ci_id AS VARCHAR) = k.ck
+    WHERE k.ck IS NOT NULL
   )
-  SELECT cs_id, ci_id, shared_matches
-  FROM ranked
-  WHERE rn = 1 AND shared_matches >= 2
+  SELECT cs_id, ci_id FROM ranked WHERE rn = 1
 ")
-cat(sprintf("  Crosswalk: %d players mapped (>= 2 shared matches)\n", nrow(crosswalk)))
+if (anyDuplicated(crosswalk$cs_id)) stop("Crosswalk maps a cricsheet player to two cricinfo ids")
+# Floor: 7,032 players on 2026-10-12. A collapse means the register or the
+# cricinfo ids changed shape, not that players vanished.
+if (nrow(crosswalk) < 5000) stop(sprintf("Crosswalk mapped only %d players (7,032 on 2026-10-12)", nrow(crosswalk)))
+cat(sprintf("  Crosswalk: %d players mapped\n", nrow(crosswalk)))
 
 # Step 2: Get cricinfo metadata (deduplicated per player)
 cat("  Fetching cricinfo metadata...\n")
@@ -102,6 +94,18 @@ if (n_raw > 0 && n_parsed < n_raw * 0.5) {
   warning(sprintf("DOB parsing: only %d/%d parsed — format may have changed", n_parsed, n_raw))
 }
 ci_meta$dob_raw <- NULL
+
+# Step 3b: Prefer main.player_dob (written by bouncer::build_player_dob()).
+has_player_dob <- dbGetQuery(con, "
+  SELECT COUNT(*) AS n FROM information_schema.tables
+  WHERE table_schema = 'main' AND table_name = 'player_dob'")$n > 0
+if (has_player_dob) {
+  player_dob <- dbGetQuery(con, "SELECT player_id, CAST(dob AS VARCHAR) AS pdob FROM main.player_dob")
+  cat(sprintf("  main.player_dob: %d dates of birth\n", nrow(player_dob)))
+} else {
+  warning("main.player_dob not found -- ages fall back to cricinfo's; run bouncer::build_player_dob()")
+  player_dob <- data.frame(player_id = character(), pdob = character())
+}
 
 # Step 4: Get all cricsheet players
 cat("  Fetching cricsheet player registry...\n")
@@ -309,12 +313,13 @@ details <- cs_players |>
   left_join(nationality, by = "player_id") |>
   left_join(crosswalk, by = c("player_id" = "cs_id")) |>
   left_join(ci_meta, by = "ci_id") |>
+  left_join(player_dob, by = "player_id") |>
   transmute(
     player_id,
     player_name,
     country,
     full_name,
-    dob,
+    dob = if (has_player_dob) pdob else dob,
     batting_style,
     bowling_style
   )
