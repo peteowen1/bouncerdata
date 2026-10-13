@@ -55,6 +55,7 @@ jobs:
         run: |
           gh release download player-rating-v2 -p "player_rating_v2.parquet" -D source
           gh release download player-rating-v2 -p "player_value_v2.parquet"  -D source
+          gh release download player-rating-v2 -p "player_rating_history.parquet" -D source
 
       # Player Rating TSA (D-P51). Same "not continue-on-error" reasoning as
       # v2 above -- an unreachable release should fail loudly, not silently
