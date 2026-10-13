@@ -56,6 +56,17 @@ jobs:
           gh release download player-rating-v2 -p "player_rating_v2.parquet" -D source
           gh release download player-rating-v2 -p "player_value_v2.parquet"  -D source
 
+      # Rating history (inthegame-blog charts). continue-on-error, unlike the
+      # v2 step above: nothing else in the build needs it, so an unreachable
+      # asset should leave the R2 copies as they are rather than stop every
+      # other cricket table from refreshing. build_blog_data.R logs ABSENT.
+      - name: Download player rating history
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+        run: |
+          gh release download player-rating-v2 -p "player_rating_history.parquet" -D source
+
       # Player Rating TSA (D-P51). Same "not continue-on-error" reasoning as
       # v2 above -- an unreachable release should fail loudly, not silently
       # publish a blog with the TSA table missing.

@@ -506,3 +506,99 @@ if (file.exists(rating_tsa_path)) {
   # other inputs.
   cat("  ratings tsa: source/player_rating_tsa.parquet ABSENT -- TSA table not published\n")
 }
+
+# ---------------------------------------------------------------------------
+# Player rating history (inthegame-blog request, 2026-10-13)
+#
+# Monthly snapshots of the v2 rating, one row per bucket x role x player x
+# month, for the player-page history chart and the ratings-page "top 10 over
+# time" chart. The release file is ~16 MB, too big for one player page, so it
+# is split one file per bucket and sorted by player_id with small row groups:
+# the front-end's fetchParquet prunes row groups by their min/max statistics,
+# so a player page fetches only the few row groups holding that player.
+#
+# Published as-is (same columns as the release file, rank and rank_all
+# included) apart from the bucket spelling, which follows the other blog
+# tables ("t20-male", not "t20_male"). `rank` is NA where the bouncer
+# history marks a player as not current that month; `rank_all` is always set.
+history_path <- "source/player_rating_history.parquet"
+
+if (file.exists(history_path)) {
+  rh <- read_parquet(history_path) |> as.data.frame()
+
+  need <- c("bucket", "role", "as_at", "rank", "rank_all", "player_id",
+            "player_name", "rating", "matches", "balls", "effective_matches",
+            "last_match")
+  missing <- setdiff(need, names(rh))
+  if (length(missing)) {
+    stop("player_rating_history.parquet is missing column(s): ",
+         paste(missing, collapse = ", "),
+         "\n  Produced by bouncer's rating-v2/06_build_rating_history.R; check ",
+         "that the release asset matches the current schema.")
+  }
+  if (nrow(rh) == 0L) stop("player_rating_history.parquet is empty.")
+  if (anyNA(rh$bucket) || anyNA(rh$player_id) || anyNA(rh$as_at)) {
+    stop("player_rating_history.parquet has NA bucket, player_id or as_at.")
+  }
+  dupes <- sum(duplicated(rh[c("bucket", "role", "player_id", "as_at")]))
+  if (dupes) stop("player_rating_history.parquet has ", dupes,
+                  " duplicate bucket x role x player x month rows.")
+
+  rh$bucket <- sub("_(?=(male|female)$)", "-", rh$bucket, perl = TRUE)
+  bad <- !grepl("-(male|female)$", rh$bucket)
+  if (any(bad)) stop("Unrecognised history bucket(s): ",
+                     paste(unique(rh$bucket[bad]), collapse = ", "))
+
+  # A file name must be safe on R2 and in a URL.
+  buckets <- sort(unique(rh$bucket))
+  stopifnot(all(grepl("^[a-z0-9_-]+$", buckets)))
+  for (b in buckets) {
+    part <- rh[rh$bucket == b, , drop = FALSE]
+    part <- part[order(part$player_id, part$role, part$as_at), , drop = FALSE]
+    out <- sprintf("blog/player-rating-history-%s.parquet", b)
+    # 4,000 rows per row group: a player's history (at most ~140 months x 2
+    # roles) then sits in one or two row groups.
+    write_parquet(part, out, chunk_size = 4000L)
+    cat(sprintf("  rating history: %-28s %7d rows, %5d players, %s to %s\n",
+                basename(out), nrow(part), dplyr::n_distinct(part$player_id),
+                min(part$as_at), max(part$as_at)))
+  }
+
+  top10 <- rh |>
+    filter(!is.na(rank), rank <= 10L) |>
+    arrange(bucket, role, as_at, rank)
+  # Every bucket-role-month with any ranked player should show a full top 10
+  # unless the bucket genuinely had fewer ranked players that month.
+  short <- rh |>
+    filter(!is.na(rank)) |>
+    group_by(bucket, role, as_at) |>
+    summarise(ranked = n(), top = sum(rank <= 10L), .groups = "drop") |>
+    filter(top != pmin(ranked, 10L))
+  if (nrow(short)) stop(nrow(short), " bucket-role-months have a broken top-10 (rank not 1..N).")
+  # The check above only looks at ranked rows, so it passes on a file where
+  # rank is NA throughout. Require every bucket-role to have ranked players in
+  # its latest month, and every bucket to reach within ~2 months of the
+  # newest snapshot -- a release stuck at an old month must not publish.
+  latest <- rh |>
+    group_by(bucket, role) |>
+    summarise(last = max(as_at),
+              ranked_last = sum(!is.na(rank) & as_at == max(as_at)),
+              .groups = "drop")
+  unranked <- latest$ranked_last == 0L
+  if (any(unranked)) stop("No ranked players in the latest month for: ",
+                          paste(latest$bucket[unranked], latest$role[unranked], collapse = ", "))
+  stale <- latest$last < max(latest$last) - 62
+  if (any(stale)) stop("History stops early for: ",
+                       paste(latest$bucket[stale], latest$role[stale], latest$last[stale], collapse = ", "))
+  stopifnot(nrow(top10) > 0L,
+            dplyr::n_distinct(top10$bucket, top10$role) == nrow(latest))
+  write_parquet(top10, "blog/player-rating-top10-history.parquet")
+  cat(sprintf("  rating history: top10 file %d rows across %d bucket-roles\n",
+              nrow(top10), dplyr::n_distinct(top10$bucket, top10$role)))
+} else {
+  # Absent means its download step (continue-on-error) failed: nothing is
+  # written, so the copies already on R2 stay up and the other blog tables
+  # still refresh. A file that IS present but fails a guard above stops the
+  # whole build, like the v2 and TSA tables, so a broken file never publishes.
+  cat("  rating history: source/player_rating_history.parquet ABSENT -- history not published\n")
+}
