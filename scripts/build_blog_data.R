@@ -575,10 +575,30 @@ if (file.exists(history_path)) {
     summarise(ranked = n(), top = sum(rank <= 10L), .groups = "drop") |>
     filter(top != pmin(ranked, 10L))
   if (nrow(short)) stop(nrow(short), " bucket-role-months have a broken top-10 (rank not 1..N).")
+  # The check above only looks at ranked rows, so it passes on a file where
+  # rank is NA throughout. Require every bucket-role to have ranked players in
+  # its latest month, and every bucket to reach within ~2 months of the
+  # newest snapshot -- a release stuck at an old month must not publish.
+  latest <- rh |>
+    group_by(bucket, role) |>
+    summarise(last = max(as_at),
+              ranked_last = sum(!is.na(rank) & as_at == max(as_at)),
+              .groups = "drop")
+  unranked <- latest$ranked_last == 0L
+  if (any(unranked)) stop("No ranked players in the latest month for: ",
+                          paste(latest$bucket[unranked], latest$role[unranked], collapse = ", "))
+  stale <- latest$last < max(latest$last) - 62
+  if (any(stale)) stop("History stops early for: ",
+                       paste(latest$bucket[stale], latest$role[stale], latest$last[stale], collapse = ", "))
+  stopifnot(nrow(top10) > 0L,
+            dplyr::n_distinct(top10$bucket, top10$role) == nrow(latest))
   write_parquet(top10, "blog/player-rating-top10-history.parquet")
   cat(sprintf("  rating history: top10 file %d rows across %d bucket-roles\n",
               nrow(top10), dplyr::n_distinct(top10$bucket, top10$role)))
 } else {
-  # Not fatal, same reasoning as v2 above.
+  # Absent means its download step (continue-on-error) failed: nothing is
+  # written, so the copies already on R2 stay up and the other blog tables
+  # still refresh. A file that IS present but fails a guard above stops the
+  # whole build, like the v2 and TSA tables, so a broken file never publishes.
   cat("  rating history: source/player_rating_history.parquet ABSENT -- history not published\n")
 }
