@@ -10,7 +10,7 @@ This repository stores the cricket database and trained models. The `bouncer` R 
 library(bouncer)
 
 # Install data from GitHub releases (recommended)
-install_bouncerdata_from_release()
+install_parquets_from_release()
 
 # Or download fresh from Cricsheet
 install_bouncer_data(formats = c("t20", "odi"))
