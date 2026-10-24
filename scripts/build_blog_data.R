@@ -186,6 +186,11 @@ balls_cols <- c("match_id", "title", "innings_number", "over_number", "ball_numb
                 "win_probability")
 
 all_player_pairs <- list()
+# Every file written below is recorded here. A missing source (its download
+# step is continue-on-error) or a write error only logs, so without the check
+# after player-names the run stayed green while the upload left stale or no
+# copies of these files on R2.
+blog_balls_built <- character()
 
 for (fmt in c("t20i", "odi", "test")) {
   tryCatch({
@@ -218,6 +223,7 @@ for (fmt in c("t20i", "odi", "test")) {
     balls <- balls |> select(all_of(available))
     out_path <- sprintf("blog/balls-%s.parquet", fmt)
     write_parquet(balls, out_path)
+    blog_balls_built <- c(blog_balls_built, out_path)
     cat(sprintf("  %s balls: %d rows, %d cols -> %s\n", fmt, nrow(balls), ncol(balls), out_path))
     rm(balls); gc()
   }, error = function(e) {
@@ -235,10 +241,20 @@ tryCatch({
     select(player_id, player_name) |>
     arrange(player_id)
   write_parquet(player_lookup, "blog/player-names.parquet")
+  blog_balls_built <- c(blog_balls_built, "blog/player-names.parquet")
   cat(sprintf("  player-names: %d players\n", nrow(player_lookup)))
 }, error = function(e) {
   warning("Failed to build player-names.parquet: ", conditionMessage(e))
 })
+
+blog_balls_missing <- setdiff(
+  c(sprintf("blog/balls-%s.parquet", c("t20i", "odi", "test")), "blog/player-names.parquet"),
+  blog_balls_built
+)
+if (length(blog_balls_missing)) {
+  stop("Not built this run: ", paste(blog_balls_missing, collapse = ", "),
+       ". See the skip/failure messages above.")
+}
 
 # ---------------------------------------------------------------------------
 # Player Rating v2 (bouncerverse D-P16 to D-P29)
