@@ -42,7 +42,6 @@ Rscript scripts/full_export_and_upload.R  # End-to-end export + upload
 
 # Download and classify Cricsheet JSON
 Rscript scripts/sync_cricsheet.R
-Rscript scripts/download_json_archives.R  # Download raw JSON archives
 
 # Check for new data
 Rscript scripts/check_updates.R
