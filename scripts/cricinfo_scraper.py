@@ -1323,9 +1323,34 @@ def _load_known_series(output_dir, fixtures_file=None):
         return set()
 
 
+FORMAT_GENDER_DIRS = ["t20i_male", "t20i_female", "odi_male", "odi_female", "test_male", "test_female"]
+
+
+def _load_bundled_ball_ids(output_dir):
+    """Match IDs already in the combined balls bundles (output_dir/combined/).
+
+    Since 2026-11-05 the daily workflow no longer uploads a per-match file once
+    its match is in the uploaded bundle, so the next run restores no
+    {match_id}_balls.parquet for it. The bundle is then the only record that the
+    match was scraped; without this check every bundled match would be scraped
+    again each run. Unreadable bundles raise: silently treating them as empty
+    would re-scrape everything.
+    """
+    import pyarrow.parquet as pq
+    ids = set()
+    combined = Path(output_dir) / "combined"
+    for fg in FORMAT_GENDER_DIRS:
+        f = combined / f"cricinfo_balls_{fg}.parquet"
+        if f.exists():
+            col = pq.read_table(f, columns=["match_id"]).column("match_id")
+            ids.update(str(v) for v in col.to_pylist() if v is not None)
+    return ids
+
+
 def _get_scraped_match_ids(output_dir):
-    """Scan output directories for match IDs that already have _balls.parquet files."""
-    scraped = set()
+    """Match IDs that already have ball-by-ball data: a per-match _balls.parquet
+    file on disk, or a row in a combined balls bundle."""
+    scraped = _load_bundled_ball_ids(output_dir)
     for fmt_dir in ["t20i_male", "t20i_female", "odi_male", "odi_female", "test_male", "test_female"]:
         d = Path(output_dir) / fmt_dir
         if d.exists():
@@ -1718,6 +1743,10 @@ def main():
 
     all_fixtures = []  # Collect fixtures across all series
     scraped_match_ids = []  # Track successfully scraped matches
+    # Matches already in the combined balls bundles count as scraped (see
+    # _load_bundled_ball_ids). Loaded once: the bundles are not rebuilt mid-run.
+    bundled_ball_ids = set() if args.force else _load_bundled_ball_ids(output_dir)
+    print(f"Combined bundles already hold ball-by-ball for {len(bundled_ball_ids):,} matches")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch_opts)
@@ -1881,7 +1910,7 @@ def main():
 
                 # Skip if already scraped in ANY format dir (unless --force)
                 if not args.force:
-                    already_scraped = False
+                    already_scraped = str(match_id) in bundled_ball_ids
                     has_metadata = False
                     for check_fmt in ["t20i_male", "t20i_female", "odi_male", "odi_female", "test_male", "test_female"]:
                         check_dir = output_dir / check_fmt

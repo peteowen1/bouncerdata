@@ -124,6 +124,10 @@ def scan_parquets_for_series(cricinfo_dir):
 
     series = {}
     match_files = list(cricinfo_path.glob("*/*_match.parquet"))
+    # The combined match bundles too: since 2026-11-05 a match's per-match file
+    # stops being uploaded once the bundle holds it, so the bundle is the only
+    # copy the next run restores.
+    match_files += sorted(cricinfo_path.glob("combined/cricinfo_match_*.parquet"))
     if not match_files:
         return {}
 
@@ -154,6 +158,8 @@ def scan_parquets_for_series(cricinfo_dir):
 
                 # Detect format from directory name as fallback
                 dir_name = mf.parent.name  # e.g. "t20i_male"
+                if dir_name == "combined":  # cricinfo_match_t20i_male.parquet
+                    dir_name = mf.stem[len("cricinfo_match_"):]
                 dir_fmt = dir_name.split("_")[0] if "_" in dir_name else ""
                 dir_gender = dir_name.split("_")[1] if "_" in dir_name else ""
 
