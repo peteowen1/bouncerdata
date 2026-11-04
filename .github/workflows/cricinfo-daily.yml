@@ -576,7 +576,8 @@ jobs:
           # ever removed, and the release hit the 950 guard (scrape red
           # 2026-10-31 to 11-04). If ANY bundle fails or is refused, nothing is
           # skipped this run: per-match files then upload exactly as before, so
-          # a match is never left with no copy on the release.
+          # a match is never left with no copy on the release. A force=true run
+          # skips nothing either (see below).
           BUNDLES_OK=true
           for f in cricinfo/combined/cricinfo_*.parquet; do
             [ -f "$f" ] || continue
@@ -597,7 +598,13 @@ jobs:
           # uploaded bundle holds.
           COVERED=/tmp/cricinfo_bundled.txt
           : > "$COVERED"
-          if [ "$BUNDLES_OK" = "true" ]; then
+          if [ "$FORCE_INPUT" = "true" ]; then
+            # A forced re-scrape writes fresh per-match files for matches the
+            # bundles already hold, and combine --merge keeps the OLD bundle rows
+            # for those ids. Skipping them here would leave the re-scrape with
+            # no copy anywhere, so a forced run uploads every changed file.
+            echo "::notice::force=true: uploading every changed per-match file, bundled or not"
+          elif [ "$BUNDLES_OK" = "true" ]; then
             if ! python - cricinfo/combined > "$COVERED" <<'PY'
           import re, sys
           from pathlib import Path
@@ -689,6 +696,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ALLOW_MISSING: ${{ inputs.allow_missing_assets }}
+          FORCE_INPUT: ${{ inputs.force }}
 
       - name: Dispatch predictions trigger
         if: success()

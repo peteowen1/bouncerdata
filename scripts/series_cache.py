@@ -109,7 +109,7 @@ def infer_gender(name="", slug="", gender_field=""):
 # ============================================================
 
 def scan_parquets_for_series(cricinfo_dir):
-    """Scan _match.parquet files to discover series metadata.
+    """Scan _match.parquet files and the combined match bundles to discover series metadata.
 
     Reads only the columns needed (series_id, series_name, format, gender,
     international_class_id) using pyarrow column projection — no full file loads.
