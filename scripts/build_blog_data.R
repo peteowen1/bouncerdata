@@ -535,8 +535,11 @@ if (file.exists(rating_tsa_path)) {
 #
 # Published as-is (same columns as the release file, rank and rank_all
 # included) apart from the bucket spelling, which follows the other blog
-# tables ("t20-male", not "t20_male"). `rank` is NA where the bouncer
-# history marks a player as not current that month; `rank_all` is always set.
+# tables ("t20-male", not "t20_male"), and one added column: `n_ranked`, the
+# number of non-NA `rank` in the same bucket, role and month, repeated on each
+# row so the page can show "#7 of 45 ranked" from one player's rows. `rank` is
+# NA where the bouncer history marks a player as not current that month;
+# `rank_all` is always set.
 history_path <- "source/player_rating_history.parquet"
 
 if (file.exists(history_path)) {
@@ -571,6 +574,10 @@ if (file.exists(history_path)) {
   for (b in buckets) {
     part <- rh[rh$bucket == b, , drop = FALSE]
     part <- part[order(part$player_id, part$role, part$as_at), , drop = FALSE]
+    # Count of ranked players per role x month within this bucket (ave groups
+    # by the interaction of role and as_at, so each row gets its own group's
+    # total).
+    part$n_ranked <- as.integer(ave(!is.na(part$rank), part$role, part$as_at, FUN = sum))
     out <- sprintf("blog/player-rating-history-%s.parquet", b)
     # 4,000 rows per row group: a player's history (at most ~140 months x 2
     # roles) then sits in one or two row groups.
