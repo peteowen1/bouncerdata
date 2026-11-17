@@ -578,6 +578,8 @@ if (file.exists(history_path)) {
     # by the interaction of role and as_at, so each row gets its own group's
     # total).
     part$n_ranked <- as.integer(ave(!is.na(part$rank), part$role, part$as_at, FUN = sum))
+    # An NA role would give NA n_ranked; fail rather than publish blanks.
+    stopifnot(!anyNA(part$n_ranked))
     out <- sprintf("blog/player-rating-history-%s.parquet", b)
     # 4,000 rows per row group: a player's history (at most ~140 months x 2
     # roles) then sits in one or two row groups.
