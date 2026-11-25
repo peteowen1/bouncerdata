@@ -1,0 +1,117 @@
+{
+  "repo": "peteowen1/bouncerdata",
+  "title": "bouncerdata pipeline",
+  "output": "docs/CI-PIPELINE.md",
+  "about": "The three daily GitHub Actions workflows in this repo that feed the cricket models and the site, in the order the data flows: the Cricsheet sync (ball-by-ball results onto the cricsheet release), the Cricinfo scrape (Hawkeye ball data and fixtures onto the cricinfo release, which then starts the predictions run in the bouncer repo), and the blog data build (aggregates the releases into the files the site reads from R2). The predictions run itself lives in the bouncer repo and has its own guide there. The Fox Sports scrape (foxsports-daily.yml) is left out: it starts nothing, and nothing in the predictions run or the blog build reads its release (checked by searching run_predictions_gha.R and build-blog-data.yml for it; whether the local heavy pipeline uses it was not checked). The heavy model-training pipeline (the 15 steps in bouncer's ARCHITECTURE.md) runs by hand on Pete's machine, not in CI, so it is not here.",
+  "runs": 5,
+  "pipelines": [
+    {
+      "name": "Cricsheet daily sync",
+      "workflow": "cricsheet-daily.yml",
+      "about": "Checks Cricsheet for matches added in the last 7 days that are not yet on the cricsheet release, and adds them. Most days there is nothing new and the run is a roughly 100 second no-op (reads the manifest, downloads the small recent-matches zip, finds no new match ids, exits): in the last 60 successful runs up to 25 Nov 2026, 56 were no-ops, 3 were incremental syncs where the sync step took 64 to 73 s, and 1 was a manual forced full rebuild where it took 1,524 s. Only scheduled runs are counted here, so the five runs below are the everyday no-op. When there are new matches the sync step also downloads the existing parquet files, merges the new matches in, rebuilds the manifest and uploads; a full rebuild downloads all_json.zip and re-parses every match. The slowest steps in the table are GitHub runner setup (installing R and the bouncer package), which varies a lot from day to day: 2 of the 5 runs below took 26 and 51 minutes only because Setup R or Install R dependencies stalled (21 and 45 minutes in the worst case), not because of any sync work.",
+      "triggers": "GitHub's own schedule, set for 7:00 UTC (6pm Sydney in summer) but started hours late in recent runs. It can also be run by hand, with a 'force full rebuild' option; manual runs are not counted here. It starts no other workflow: the predictions run and the blog build read its release files (matches.parquet and players.parquet on the cricsheet release) when they next run.",
+      "select": {
+        "events": [
+          "schedule"
+        ]
+      },
+      "jobs": [
+        {
+          "name": "sync-cricsheet",
+          "match": "^sync-cricsheet$",
+          "about": "Installs R and the bouncer package, then compares Cricsheet's last 7 days of matches with the cricsheet release and adds any that are missing",
+          "steps": {
+            "Setup R": "Installs the current release of R (using the public package mirror)",
+            "Install system dependencies": "Installs the Linux libraries (curl, ssl, xml) the R packages need to compile",
+            "Cache R packages": "Restores the R packages saved by an earlier run, so they are not rebuilt",
+            "Install R dependencies": "Installs httr2, jsonlite, arrow, piggyback, cli and dplyr, then installs the bouncer package from the dev branch on GitHub (which builds it)",
+            "Check for new matches and sync": "The sync itself, an inline R script: downloads the manifest of match ids already on the cricsheet release, downloads Cricsheet's recently_added_7_json.zip, and stops with 'no new matches' if every id is already there. Otherwise it parses the new matches, merges them into the existing parquet files (matches, players, innings, powerplays, and ball-by-ball deliveries split by match type and gender), writes a new manifest and uploads everything to the cricsheet release, manifest last",
+            "Summary": "Writes the match counts and whether it was a no-op, incremental or full rebuild to the run's summary page",
+            "Create issue on failure": "If the run failed, opens one GitHub issue for the day (skipped when everything worked)"
+          },
+          "log": {
+            "headers": [
+              {
+                "regex": "^── (?P<name>(?!R CMD build)(?!Cricsheet Daily Sync)(?!Sync Complete)[^─]+?) ──",
+                "label": "the stages of the sync script"
+              }
+            ],
+            "about": {
+              "Checking current state": "Downloads the manifest of match ids already on the cricsheet release",
+              "Downloading recent matches from Cricsheet": "Downloads Cricsheet's last-7-days zip, unpacks it and works out which match ids are new; on a no-op day the script stops at the end of this stage"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Cricinfo scrape",
+      "workflow": "cricinfo-daily.yml",
+      "about": "Scrapes ESPN Cricinfo with a browser: ball-by-ball Hawkeye data, match details and scorecards for the newest series, plus a refresh of the status of upcoming fixtures. New files are merged into the combined files on the cricinfo release (one set per format and gender), then the predictions run is started. Only scheduled runs are counted; a manual run with a series list or the force option is a different amount of work.",
+      "triggers": "GitHub's own schedule, set for 12:00 UTC (11pm Sydney in summer) but started hours late in recent runs. When it finishes, two things start by themselves: it sends a 'cricinfo-complete' dispatch that starts the Predictions Pipeline workflow in the bouncer repo, and its completion also starts the 'Build blog data' workflow in this repo (that run uses the previous predictions, a few minutes before the new ones are ready). A second 'Build blog data' run starts when the predictions finish. Those runs are not stitched into this one.",
+      "select": {
+        "events": [
+          "schedule"
+        ]
+      },
+      "jobs": [
+        {
+          "name": "scrape",
+          "match": "^scrape$",
+          "about": "Restores everything already on the cricinfo release, scrapes the new matches, merges them in, uploads the result and starts the predictions run",
+          "steps": {
+            "Check cricinfo release asset-count headroom": "Counts the files on the cricinfo release and stops the run if it is at 950 or more, because GitHub allows at most 1,000 files per release",
+            "Setup Python": "Installs Python 3.12",
+            "Cache pip packages": "Restores the Python packages saved by an earlier run",
+            "Install Python dependencies": "Installs the packages in scripts/requirements-cricinfo.txt and the Playwright Chromium browser",
+            "Install Xvfb": "Installs a virtual screen, because the scraper drives a full (not headless) browser to get past Cricinfo's bot checks",
+            "Restore previous data from release": "Downloads every parquet file on the cricinfo release, stops if any of the 18 combined files or fixtures.parquet is missing, and records each file's row count and checksum so the upload step can refuse to shrink a file and skip files that did not change",
+            "Discover new series": "Runs scripts/discover_series.py to find Cricinfo series not yet in scripts/series_list.csv (failure does not fail the run)",
+            "Commit updated series list": "If new series were found, commits the updated scripts/series_list.csv and pushes it to the dev branch (does nothing when the list did not change)",
+            "Run scraper": "Runs scripts/cricinfo_scraper.py: for up to 3 series per format (from series_list.csv and the series already in the saved files), scrapes up to 50 matches per series that do not yet have ball-by-ball data, and writes per-match balls, match and innings parquet files",
+            "Refresh fixture statuses": "Runs the scraper again in fixtures-only mode over up to 150 series per format, so matches saved as upcoming do not stay stuck at 'PRE' (failure does not fail the run)",
+            "Report fixture-refresh outcome": "Writes whether the fixture refresh worked, and its counts, to the run's summary page",
+            "Alert on fixture-refresh failure": "Opens a GitHub issue if the fixture refresh failed (skipped when it worked)",
+            "Create release if needed": "Creates the cricinfo release if it does not exist yet",
+            "Build combined parquets": "Runs scripts/combine_cricinfo_parquets.py --merge: adds the new per-match files to the combined files, one per table (balls, match, innings) and format and gender",
+            "Upload results to release": "Uploads the combined files and fixtures.parquet to the cricinfo release (a new copy goes up before the old one is removed; a file that would have fewer rows than the one restored is refused; unchanged files are skipped), plus any per-match file the combined files do not yet hold",
+            "Dispatch predictions trigger": "Sends a 'cricinfo-complete' event to the bouncer repo, which starts its Predictions Pipeline workflow",
+            "Create issue on failure": "If the run failed, opens one GitHub issue for the day (skipped when everything worked)"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Build blog data",
+      "workflow": "build-blog-data.yml",
+      "about": "Turns the rating, cricinfo, cricsheet and predictions files on the GitHub releases into the aggregated parquet files the inthegame-blog cricket pages read, and uploads them to the R2 store. Only the runs started by the predictions-complete dispatch are counted, because those run after the day's predictions are published; the run started by the Cricinfo scrape finishing is the same job with the previous predictions.",
+      "triggers": "Three ways: a 'predictions-complete' dispatch sent by the bouncer repo's Predictions Pipeline when it finishes (the runs counted here), the Cricinfo Scrape workflow completing successfully, or by hand. It starts nothing: the site reads the R2 files.",
+      "select": {
+        "events": [
+          "repository_dispatch"
+        ]
+      },
+      "jobs": [
+        {
+          "name": "build",
+          "match": "^build$",
+          "about": "Downloads the source files from the releases, runs scripts/build_blog_data.R, and uploads the results to R2",
+          "steps": {
+            "Download source parquets": "Downloads the player, team and venue skill files for T20, ODI and Test from the player_rating, team_rating and venue_rating releases",
+            "Download player rating v2": "Downloads the player rating and player value files from the player-rating-v2 release (the run fails if they are missing)",
+            "Download player rating history": "Downloads the rating history file from the player-rating-v2 release (the run carries on without it if missing)",
+            "Download player rating TSA": "Downloads the TSA player rating file from the player-rating-tsa release (the run fails if it is missing)",
+            "Download player registry (required)": "Downloads players.parquet (player ids and names) from the cricsheet release; the run fails if it is missing",
+            "Download player enrichment (optional)": "Downloads bouncer_player_details.parquet (country, birth date, styles) from the player_details release; optional",
+            "Download cricinfo balls data": "Downloads the combined Cricinfo ball and innings files for men's T20I, ODI and Test from the cricinfo release; optional",
+            "Download predictions": "Downloads predictions.parquet from the predictions-latest release; optional",
+            "Aggregate": "Runs scripts/build_blog_data.R, which writes the blog's aggregated parquet files into the blog folder",
+            "Run actions/setup-node@v7": "Installs Node 20, needed for the Cloudflare upload tool",
+            "Upload to R2": "Installs wrangler and uploads each blog/*.parquet file to the inthegame-data store under cricket/ on Cloudflare R2",
+            "Create issue on failure": "If the run failed, opens one GitHub issue for the day (skipped when everything worked)"
+          }
+        }
+      ]
+    }
+  ]
+}
